@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Iterator
+from googleapiclient.errors import HttpError
 
 _METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"]
 
@@ -60,7 +61,14 @@ class GmailReadOnlyClient:
                     mid = str(message.get("id", ""))
                     if mid and mid not in seen: seen.add(mid); ids.append(mid)
             next_token = response.get("nextPageToken")
-            yield {"messages":[self._get(mid, full=False) for mid in ids],
+            messages = []
+            for mid in ids:
+                try:
+                    messages.append(self._get(mid, full=False))
+                except HttpError as exc:
+                    # History can reference mail deleted before metadata fetch.
+                    if exc.resp.status != 404: raise
+            yield {"messages":messages,
                    "truncated": bool(next_token and page_no + 1 >= max_pages)}
             if not next_token: break
             page_token = next_token
