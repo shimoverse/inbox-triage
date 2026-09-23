@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inbox-triage"
+version = "0.1.0"
+description = "Private, label-only Gmail triage with Jev and no frontier-model orchestrator"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["google-api-python-client>=2.0", "google-auth>=2.0", "google-auth-oauthlib>=1.2"]
+
+[project.scripts]
+inbox-triage = "inbox_triage.runner:main"
+inbox-triage-auth = "inbox_triage.auth:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

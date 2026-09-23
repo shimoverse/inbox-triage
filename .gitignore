@@ -1,0 +1,26 @@
+# Private data and credentials
+private/
+*.db
+*.db-*
+*.sqlite*
+*.jsonl
+.env*
+token.json
+*.token.json
+*client*.json
+credentials*.json
+*secret*
+*real*.eml
+*.eml
+*.mbox
+*.pem
+*.key
+*.p12
+*.pfx
+.local/
+state/
+*.log
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
