@@ -67,8 +67,18 @@ def _decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds) -> Ro
     if personal_event_subject(e) and (e.protected_kinds or s.service_update >= t.update):
         confidence = max(s.service_update, .85 if e.protected_kinds else 0)
         return RoutingDecision(Destination.UPDATES, "Protected account, transaction, school, security, government, or health evidence.", confidence, topics)
-    if s.personal_relevance >= t.relevant or s.personalized_offer >= t.relevant:
-        return RoutingDecision(Destination.FOR_YOU, "The message is specifically relevant to an active relationship or priority.", max(s.personal_relevance, s.personalized_offer), topics)
+    mass_mail = e.bulk or e.list_unsubscribe
+    relationship = bool(c.thread_participation or c.sender_relationship in {"active_thread", "known_person"}
+                        or c.priorities_relevant)
+    # For You means a person or a priority of yours, not marketing "based on your activity".
+    if s.personal_relevance >= t.relevant and (not mass_mail or relationship):
+        return RoutingDecision(Destination.FOR_YOU, "The message is specifically relevant to an active relationship or priority.", s.personal_relevance, topics)
+    # Mass mail tailored from your activity (listings, "picked for you" offers) can wait,
+    # unless it's a security notice, a real account/order event, or from someone you know.
+    tailored = max(s.personal_relevance, s.personalized_offer)
+    if (mass_mail and tailored >= t.relevant and not relationship and not c.recent_purchase
+            and "security" not in e.protected_kinds and not personal_event_subject(e)):
+        return RoutingDecision(Destination.LATER, "Mass mail tailored to your activity; it can wait.", tailored, topics, True)
     authenticated = e.auth.get("dmarc") == "pass" or (e.auth.get("spf") == "pass" and e.auth.get("dkim") == "pass")
     if not protected and (e.bulk or e.list_unsubscribe) and s.deceptive >= t.spam and s.unsolicited_bulk >= .90 and not authenticated:
         return RoutingDecision(Destination.SPAM, "Very strong deception and unsolicited evidence without a protected relationship.", min(s.deceptive, s.unsolicited_bulk), topics, True)

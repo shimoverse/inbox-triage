@@ -289,3 +289,26 @@ def test_dotenv_loads_known_keys_without_overriding(tmp_path, monkeypatch):
     import os
     assert os.environ["TYPESAFE_API_KEY"] == "from-file" and os.environ["OPENROUTER_API_KEY"] == "already-set"
     assert os.environ["PATH"] != "/evil"
+
+
+
+def test_activity_based_marketing_is_later_not_for_you():
+    """Realtor/Redfin-style "based on your recent activity" alerts were landing in For You."""
+    listing = MailEvidence("m", sender="consumer@e.mail.realtor.example", sender_domain="e.mail.realtor.example",
+                           subject="Rental price drops in Fremont, CA", bulk=True, list_unsubscribe=True,
+                           auth={"dmarc": "pass"})
+    offer = JevSignals(personalized_offer=.95, personal_relevance=.9)
+    assert decide(listing, ContextPack(), offer).destination == Destination.LATER
+    # The same mail from someone you actually correspond with stays For You.
+    known = ContextPack(sender_relationship="known_person")
+    assert decide(listing, known, offer).destination == Destination.FOR_YOU
+    # A personal (non-bulk) message that matters is For You.
+    note = MailEvidence("m", sender="friend@example.org", subject="Dinner Saturday?")
+    assert decide(note, ContextPack(), JevSignals(personal_relevance=.9)).destination == Destination.FOR_YOU
+    # Bulk security notices and real order events are never pushed to Later by this rule.
+    alert = MailEvidence("m", subject="New sign-in to your account", bulk=True, protected_kinds=frozenset({"security"}))
+    assert decide(alert, ContextPack(), offer).destination != Destination.LATER
+    order = MailEvidence("m", subject="Your order #123 has shipped", bulk=True, list_unsubscribe=True)
+    assert decide(order, ContextPack(), offer).destination != Destination.LATER
+    # A bulk offer alone (no relevance) is not For You either.
+    assert decide(listing, ContextPack(), JevSignals(personalized_offer=.95)).destination != Destination.FOR_YOU

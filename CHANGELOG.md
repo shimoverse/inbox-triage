@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- **For You is now only for people and your priorities.** Mass mail tailored "based on your activity" (listing alerts, picked-for-you offers) from senders you don't correspond with now goes to Later instead.
+  - Security notices and real order or account events are never pushed to Later.
+  - Mail from people you know still gets For You.
+
 ## 0.4.1
 
 - **Free-beta controls for hosted servers.**
