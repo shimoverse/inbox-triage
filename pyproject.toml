@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "inbox-triage"
 version = "0.2.0"
-description = "Private, label-only Gmail triage: an LLM answers a few questions, a local policy adds labels"
+description = "Private, label-only Gmail triage powered by Jev: typed decisions, local policy, Gmail labels"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Shimoverse" }]
-keywords = ["gmail", "email", "triage", "llm", "labels", "privacy", "ollama", "claude"]
+keywords = ["gmail", "email", "triage", "jev", "typesafe", "labels", "privacy"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -21,9 +21,6 @@ classifiers = [
 ]
 dependencies = ["google-api-python-client>=2.0", "google-auth>=2.0", "google-auth-oauthlib>=1.2"]
 
-[project.optional-dependencies]
-anthropic = ["anthropic>=1.0"]
-
 [project.urls]
 Homepage = "https://github.com/shimoverse/inbox-triage"
 Issues = "https://github.com/shimoverse/inbox-triage/issues"
@@ -31,6 +28,12 @@ Issues = "https://github.com/shimoverse/inbox-triage/issues"
 [project.scripts]
 inbox-triage = "inbox_triage.runner:main"
 inbox-triage-auth = "inbox_triage.auth:main"
+inbox-triage-web = "inbox_triage.web.app:serve"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inbox_triage"]
+# A distributor's bundled Google OAuth client is git-ignored but must ship in the wheel.
+artifacts = ["src/inbox_triage/web/oauth_client.json"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

@@ -2,130 +2,141 @@
 
 [![CI](https://github.com/shimoverse/inbox-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/shimoverse/inbox-triage/actions/workflows/ci.yml)
 
-**An email sorting assistant that keeps you in control.** Inbox Triage reads new Gmail messages, asks a language model a few focused yes/no questions, and adds useful Gmail labels. It does **not** archive, send, delete, mark read, or move messages to Spam. Uncertain mail stays where it is. Each account runs independently on your own machine, with your own Google credentials.
+**Gmail triage powered by [Jev](https://typesafe.ai/).** Sign in with Google, tell it in your own words what matters, and Inbox Triage adds useful Gmail labels on the schedule you choose: `Triage/Needs You`, `Triage/Updates`, `Triage/For You`, `Triage/Later`, `Topics/Shopping`. It never sends, deletes, archives, marks read, or moves mail to Spam. Uncertain mail stays exactly where it was.
 
-## What it feels like
+## Why Jev
 
-1. **Connect your Gmail accounts** on your own computer. OAuth tokens stay there.
-2. **Preview first** with `--dry-run`. You see aggregate counts, not your private message text.
-3. **Turn on labels** when you're comfortable. Look for `Triage/Needs You`, `Triage/Updates`, `Triage/For You`, `Triage/Later`, and `Topics/Shopping` in Gmail. A message can get one attention label and a Shopping label. Otherwise it stays unchanged.
-4. **Schedule it.** Each run resumes from a private checkpoint, skips messages it already verified, and reads back every label change.
+Jev by TypeSafe is a **System One model**. It doesn't write text; it makes fast, typed decisions with calibrated probabilities, which is exactly what triage needs. For every email, Jev answers nine questions in one call:
+
+- Does it need you?
+- Is a person waiting on you?
+- Is it a service update?
+- Is it personally relevant?
+- Is it a personalised offer?
+- Is it bulk mail?
+- Is it deceptive?
+- What category is it?
+- Is it about shopping?
+
+Fixed local rules turn those answers into at most one attention label, plus a Shopping topic label when that applies. TypeSafe quotes about 0.1 s and a small fraction of a cent per decision, and the dashboard shows the number of Jev decisions and their average latency for every run.
+
+**A Jev key is required, and each user brings their own.** Get one at [console.typesafe.ai](https://console.typesafe.ai/). Without it the app won't sort mail, and it links you there. On the hosted app a user's key is used only for their own mailbox, and the server never falls back to an operator key.
 
 ```mermaid
 flowchart LR
-    A[Your Gmail account] --> B[Local extractor]
-    B --> C[Clean, short excerpt + coarse context]
-    C --> D[Model: focused questions]
-    D --> E[Conservative local policy]
-    E --> F{Clear result?}
-    F -->|Yes| G[Add Gmail label + verify]
-    F -->|Uncertain or suspicious| H[Leave message unchanged]
-    G --> I[Private account checkpoint]
-    H --> I
+    A[Gmail] --> B[Local extractor: clean excerpt, sender auth, bulk headers]
+    B --> C[Jev: 9 typed questions]
+    C --> D[Local policy + your rules]
+    D --> E{Clear?}
+    E -->|Yes| F[Add Gmail label + verify]
+    E -->|Uncertain or suspicious| G[Leave unchanged]
 ```
 
-The model is only asked questions. It never decides what happens to mail. The local rules in [`policy.py`](src/inbox_triage/policy.py) do that, so a manipulative email ("ignore previous instructions…") can at worst avoid getting a label.
+Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned excerpt of up to 1,000 characters, coarse context flags such as "you've emailed this person", and your short summary of what matters. It never sees message IDs, addresses, attachments, earlier mail, or your Google token.
 
-## Choose a classifier
+## Two ways to use it
 
-| `--provider` | Where mail excerpts go | Setup |
+| | **Path 1: the hosted app** | **Path 2: clone and run it yourself** |
 |---|---|---|
-| `openai` | Any OpenAI-compatible endpoint. The default is a **local [Ollama](https://ollama.com)** server (`http://localhost:11434/v1`), so nothing leaves your machine. | `ollama pull llama3.1:8b`, then `--model llama3.1:8b`. Set `OPENAI_BASE_URL` / `OPENAI_API_KEY` to use a hosted endpoint. |
-| `anthropic` | Claude via the Anthropic API | `uv sync --extra anthropic`, then set `ANTHROPIC_API_KEY`. Default model `claude-opus-5`; override with `--model`. |
-| `jev` (default) | [Jev](https://typesafe.ai/) by typesafe.ai | Set `TYPESAFE_API_KEY`. |
-| `rules` | Nowhere: no model, fully offline | Nothing. It uses Gmail's own categories and headers, and labels only obvious bulk mail. Good for a first trial. |
+| For | Anyone; no technical setup | Developers, privacy maximalists, contributors |
+| Google setup | None; the app's Google project is already set up | Create your own OAuth client once (about 10 min, guided in the app) |
+| You provide | Your Jev key | Your Jev key, plus optionally an OpenRouter key for the notes assistant |
+| Where mail is processed | The operator's server | Your own computer |
+| Scheduling | Handled by the server | Keep the app running, or add one cron line |
 
-Every provider gets the same trimmed input: the sender domain, a subject of up to 200 characters, a cleaned excerpt of up to 1,000 characters, and coarse context flags. It never gets message IDs, addresses, full MIME, attachments, earlier mail, or your OAuth token. You can set a default with `INBOX_TRIAGE_PROVIDER` and `INBOX_TRIAGE_MODEL`.
+### Path 1: use the hosted app
 
-## Get started
+1. Open the app and enter your email, then click **Sign in with Google** and approve the permission to manage Gmail labels.
+2. **Connect Jev.** Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
+3. **Tell it what matters.**
+   - Tap *Important* or *Not important* on a few recent emails.
+   - Or type freely: *"#1 is my kids' school, always important. I don't care about real estate emails."* Prefer talking? Speak into Open Voice Flow or any voice-to-text app and paste the text.
+   - Click **Turn my notes into rules**, review the rules, and save.
+4. **Pick a timeframe** (last day, 7, 30 or 90 days, optionally preview-only) **and a schedule** (hourly, daily, weekly, or the last day of each month).
+5. **Watch the dashboard:** last and next run, Jev decisions and speed, run history, recently labeled mail with links into Gmail, and your rules.
+
+*Operators:* see [docs/hosting.md](docs/hosting.md) to deploy, and [docs/google-cloud-setup.md](docs/google-cloud-setup.md) for the one-time Google Cloud work.
+
+### Path 2: clone and run it yourself
 
 Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
-
-### 1. Google Cloud setup (once, about 10 minutes)
-
-Each user brings their own Google OAuth client. This keeps your mailbox between you and Google, and it avoids Google's paid security review, which a shared "restricted scope" app would need.
-
-1. In the [Google Cloud console](https://console.cloud.google.com/), create a project and **enable the Gmail API**.
-2. Configure the **OAuth consent screen**: choose User type *External* (or *Internal* on Google Workspace) and add your addresses as test users.
-3. **Important:** while the app's publishing status is *Testing*, Google [expires refresh tokens after 7 days](https://developers.google.com/identity/protocols/oauth2#expiration), and scheduled runs start failing. For unattended use, click **Publish app**. For personal use (fewer than 100 users), you can [skip verification](https://support.google.com/cloud/answer/13464323) and accept the "unverified app" warning during consent.
-4. Create **Credentials → OAuth client ID → Desktop app**. Download the JSON to `~/.config/inbox-triage/client_secret.json`. Keep it outside this repository.
-
-The app requests only `gmail.modify`, the narrowest Gmail scope that allows adding labels to messages. It never calls the send, delete, archive, or mark-read endpoints.
-
-### 2. Connect accounts and run
 
 ```bash
 git clone https://github.com/shimoverse/inbox-triage.git
 cd inbox-triage
-uv sync                                  # add --extra anthropic for Claude
-
-# Browser consent happens locally. Repeat for each account; tokens are saved to
-# ~/.config/inbox-triage/tokens/<email>.json (use --no-browser over SSH).
-uv run inbox-triage-auth
-
-# Preview: classifies but changes nothing in Gmail.
-uv run inbox-triage --account you@example.com --provider rules --dry-run --max 5
-
-# Label for real, one account or every connected account.
-uv run inbox-triage --account you@example.com --provider openai --model llama3.1:8b
-uv run inbox-triage --all --provider anthropic
+uv sync
+cp .env.example .env        # add TYPESAFE_API_KEY (required) and OPENROUTER_API_KEY (optional)
+uv run inbox-triage-web     # opens http://127.0.0.1:8765
 ```
 
-The program checks that `--account` matches the mailbox the token belongs to before it processes anything. Keep tokens and API keys out of shared folders and shell history; prefer a secret manager or a private service environment over typing `export KEY=...`.
+The first screen walks you through connecting Google once: create a Cloud project, enable the Gmail API, click **Publish app**, create a *Desktop app* client, and paste its JSON. [docs/google-cloud-setup.md](docs/google-cloud-setup.md) has the details. After that, it's the same journey as Path 1, entirely on your machine.
 
-### 3. Schedule it
-
-This repository does not install a background service. Use your OS scheduler, for example cron every 15 minutes:
+To have schedules run without keeping the app open, add one hourly cron line. It follows each account's schedule from the UI:
 
 ```cron
-*/15 * * * * cd ~/inbox-triage && ANTHROPIC_API_KEY=... uv run inbox-triage --all --provider anthropic >> ~/.local/state/inbox-triage.log 2>&1
+0 * * * * cd ~/inbox-triage && uv run inbox-triage --all --due >> ~/.local/state/inbox-triage.log 2>&1
 ```
 
-Use launchd on macOS, or a systemd user timer on Linux. A per-account lock prevents overlapping runs, and one failing account does not stop the others. The exit code is non-zero if any account failed. Add `--verbose` to include error messages in the output.
+Terminal only:
+
+```bash
+uv run inbox-triage-auth                                  # connect an account
+uv run inbox-triage --account you@example.com --dry-run   # preview, no Gmail changes
+uv run inbox-triage --all --days 30                       # backfill 30 days for every account
+```
+
+## The optional notes assistant
+
+Jev decides; it doesn't write. Reading your typed notes and proposing rules is a language task, so it goes to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, which you can change with `INBOX_TRIAGE_ASSIST_MODEL`). It runs only when you click **Turn my notes into rules**, and you review every rule before it's saved. On the hosted app the operator provides it. When you run it yourself, add `OPENROUTER_API_KEY` or skip it and tag emails instead. It never classifies email.
 
 ## How it behaves
 
-- A new account starts with **the last seven days** of received mail and processes up to **100 messages per account per run**. If that leaves a backlog, it won't advance its checkpoint until the scan is complete; just run it again. Later runs overlap by two days to catch delayed indexing and skip messages they already verified.
-- Context comes from your mailbox. People you have emailed and threads you took part in count as known relationships. Authenticated (DMARC-pass) order and receipt senders count as recent purchases. It stores only account-scoped hashes of these facts, locally, and updates them incrementally through the Gmail History API. If Gmail's history window expires (roughly a week without a run), it rebuilds the context automatically.
-- If the model returns an unusable answer, that message is retried on the next two runs and then left unchanged. Other mail keeps flowing. If the provider fails repeatedly, the run stops without advancing.
-- Mail the model flags as possibly deceptive **never** gets an attention label.
-- Optional priorities live in the account's private state folder as `priorities.json`, for example `{"priorities":[{"topic":"renewal","terms":["renewal"],"expires":"2027-01-01"}]}`. Only matching, unexpired topic names are sent to the model.
-
-### Google Workspace: many mailboxes, one key
-
-Workspace admins can triage many users without per-user consent, using a service account with [domain-wide delegation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority):
-
-1. Create a service account and a JSON key.
-2. In the Admin console (Security → API controls → Domain-wide delegation), authorize its client ID for `https://www.googleapis.com/auth/gmail.modify`.
-3. Run: `uv run inbox-triage --service-account key.json --account alice@corp.example --account bob@corp.example`
-
-Delegation only works for Workspace domains, not consumer gmail.com accounts. Treat the key as highly sensitive: it can read every mailbox you delegate.
+- **Your rules come first, within safety limits.**
+  - *Important* senders, domains and topics get at least **For You**.
+  - *Not important* ones go to **Later**.
+  - Sender and domain rules only apply to authenticated (DMARC, or SPF plus DKIM) mail, so they can't be spoofed.
+  - Suspected phishing is never promoted, and security alerts are never pushed to Later.
+- **Runs work in batches.** Scheduled runs continue from the last checkpoint. Batches are 100 messages, with at most 2,000 per run. Runs overlap by two days to catch delayed mail and skip anything already verified.
+- **Context comes from your mailbox.** People you've emailed, threads you joined, and authenticated receipts count. Only account-scoped hashes of these facts are stored, updated through the Gmail History API, and rebuilt automatically if that history expires.
+- **Jev failures are contained.** Jev calls retry on 429 and 529 ("overloaded"). A message that repeatedly gets an unusable answer is left unchanged after three tries. If Jev fails repeatedly in a row, the run stops without advancing.
+- **Google Workspace admins** can triage many mailboxes with a service account and domain-wide delegation: `inbox-triage --service-account key.json --account a@corp.example --account b@corp.example`.
 
 ## Privacy and limits
 
-- **Local files per account:** a checkpoint, a deduplication journal of Gmail message IDs and label decisions (compacted after 30 days), and a SQLite store of hashed relationship evidence. The default location is `~/.local/share/inbox-triage/`, one opaque directory per account, with 0700/0600 permissions. Raw messages are never saved. Exclude this directory from shared cloud sync and backups.
-- Only received mail is considered; Sent, Drafts, Spam, and Trash are excluded. A message that is already read or archived can still be labeled, and labels never change its location or read status.
-- Labels are created on the first live run, and only these five are managed. There is no automatic Spam routing, archiving, sending, deleting, unsubscribing, or learning from read state.
-- This is a conservative aid, **not** a guaranteed detector of urgent mail. Don't rely on it as your only way to notice security, medical, financial, or time-sensitive messages. Quality varies by model, language, and mailbox.
-- Gmail API quota: each labeled message costs about 65 [quota units](https://developers.google.com/workspace/gmail/api/reference/quota) (one full read, two label readbacks, one modify), and there is a one-time bootstrap of up to 500 metadata reads. The per-user limit is 6,000 units per minute. Reads are batched, and rate-limit responses are retried with backoff.
+- **Local files per account** (`~/.local/share/inbox-triage/`, 0700/0600):
+  - checkpoint, settings and schedule;
+  - your rules and notes summary;
+  - the account's Jev key (Path 1);
+  - run history;
+  - a journal of Gmail message IDs and label decisions;
+  - hashed relationship evidence.
+
+  Raw messages are never saved; the dashboard fetches subjects live. Google tokens, local keys and the web session secret live in `~/.config/inbox-triage/` (0600).
+- **Web app security:**
+  - listens on 127.0.0.1 unless hosted, and hosting requires HTTPS;
+  - signed HttpOnly sessions, and each Google account sees only its own data;
+  - a CSRF header check, a Host check, a strict CSP, and PKCE for Google sign-in.
+- The app requests only `gmail.modify`, the narrowest Gmail permission that allows adding labels, and never calls the send, delete, archive or mark-read endpoints.
+- This is a conservative aid, **not** a guaranteed detector of urgent mail. Jev's documentation doesn't list supported languages, so treat non-English mailboxes as untested.
+- Gmail quota: about 65 units per labeled message, against a per-user limit of 6,000 units per minute. Reads are batched and retried with backoff.
 
 ## Developers
 
 ```bash
-uv sync --dev --extra anthropic
+uv sync --dev
 uv run pytest -q
-uv run inbox-triage --help
 ```
 
 | Module | Role |
 |---|---|
-| `gmail/client.py` | Gmail access: batching, retries, History API, OAuth token and service-account credentials |
-| `gmail/extract.py` | MIME → cleaned excerpt plus authentication and bulk signals |
-| `context.py`, `store.py` | Hashed relationship and purchase facts learned from Sent mail and history |
-| `providers/` | `base.py` (questions and answer parsing), `jev.py`, `llm.py` (Claude, OpenAI-compatible), `rules.py` |
-| `policy.py` | Signals → at most one attention label and a topic label |
-| `runner.py` | Per-account scheduling, locking, journal, label apply and readback, CLI |
+| `providers/` | Jev: questions, answer parsing (noul/choice), retries, key check |
+| `assistant.py`, `onboarding.py` | Optional notes → rules via OpenRouter |
+| `policy.py`, `preferences.py` | Jev answers + your rules → labels |
+| `gmail/` | Gmail access (batching, retries, History API) and message extraction |
+| `context.py`, `store.py` | Hashed relationship and purchase facts |
+| `runner.py`, `accounts.py`, `config.py` | Triage batches, history, schedules, keys; the CLI |
+| `web/` | Web app (stdlib WSGI): Google sign-in, onboarding, dashboard, scheduler |
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/landscape.md](docs/landscape.md) for related projects and the roadmap. Use synthetic messages in tests, never real email exports.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/landscape.md](docs/landscape.md). Use synthetic messages in tests, never real email.
 
 MIT license.

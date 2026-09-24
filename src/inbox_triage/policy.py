@@ -37,7 +37,25 @@ _PROMOTIONAL_SUBJECT = re.compile(
 def personal_event_subject(e: MailEvidence) -> bool:
     return bool(_PERSONAL_EVENT.search(e.subject) and not _PROMOTIONAL_SUBJECT.search(e.subject))
 
-def decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds = Thresholds()) -> RoutingDecision:
+def decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds = Thresholds(),
+           preference=None) -> RoutingDecision:
+    """Model signals -> at most one attention label; a matching user rule
+    (``preferences.Rule``) then adjusts it, within the safety limits."""
+    base = _decide(e, c, s, t)
+    if preference is None or s.deceptive >= t.suspicious:
+        return base
+    if preference.action == "important":
+        if base.destination in {Destination.NEEDS_YOU, Destination.UPDATES, Destination.FOR_YOU}:
+            return base
+        return RoutingDecision(Destination.FOR_YOU, "You told us mail like this matters to you.", .9, base.topics)
+    if preference.action == "not_important":
+        if "security" in e.protected_kinds:
+            return base  # never bury sign-in or verification alerts
+        return RoutingDecision(Destination.LATER, "You told us mail like this can wait.", .9, base.topics, True)
+    return base
+
+
+def _decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds) -> RoutingDecision:
     topic_scores = {k: float(v) for k, v in s.topics.items() if k in ALLOWED_TOPICS and 0 <= float(v) <= 1 and float(v) >= t.topic}
     topics = TopicDecision(tuple(sorted(topic_scores)), topic_scores)
     protected = bool(e.protected_kinds or e.user_replied or "IMPORTANT" in e.labels or "CATEGORY_UPDATES" in e.labels or c.thread_participation or c.recent_purchase or c.active_subscription or c.similar_replied or c.sender_relationship in {"active_thread", "known_person"})

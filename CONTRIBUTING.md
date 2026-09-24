@@ -12,12 +12,14 @@ Thanks for helping! Inbox Triage handles private mail, so a few rules are firmer
 ## Development
 
 ```bash
-uv sync --dev --extra anthropic
+uv sync --dev
 uv run pytest -q
 ```
 
 CI runs the tests on Python 3.11–3.13. Keep dependencies minimal; new providers should use the vendor's official SDK as an optional extra, or the standard library.
 
-## Adding a provider
+## Jev and the assistant
 
-Subclass `providers.base.Provider`, implement `classify_with_usage()` so it returns `(JevSignals, usage)`, and build its answers with `questions()` and `parse_answers()`. Then register it in `providers/__init__.py`. Tests must stub the network.
+- **Every per-email decision is a Jev answer.** New signals should be new Jev questions (`providers/base.py`), and `policy.py` should interpret them conservatively.
+- **The optional assistant** (`assistant.py`, OpenRouter) only turns typed notes into rules that the user reviews. It must never classify mail.
+- **Tests stub the network.** Use Jev's documented response shapes: `{"type": "noul", "noul": 0.9}` and `{"type": "choice", "choice": ..., "probabilities": {...}, "confidence": ...}`.

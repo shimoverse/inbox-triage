@@ -1,0 +1,189 @@
+"""Per-account settings, schedule, and run history shared by the CLI and web app."""
+from __future__ import annotations
+
+import calendar
+import json
+import os
+import time
+from datetime import datetime, timedelta, tzinfo
+from pathlib import Path
+
+from . import preferences as prefs_mod
+from .gmail.client import write_private
+
+FREQUENCIES = ("off", "hourly", "daily", "weekly", "monthly")
+DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
+                    "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0}}
+MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
+
+
+def account_dir(root: Path, account: str) -> Path:
+    from .runner import scoped_directory
+    directory = scoped_directory(root.expanduser(), account)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory
+
+
+class Account:
+    def __init__(self, state_root: Path, email: str):
+        self.email = email.casefold()
+        self.dir = account_dir(state_root, self.email)
+
+    # -- settings ---------------------------------------------------------
+    def settings(self) -> dict:
+        try:
+            saved = json.loads((self.dir / "settings.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            saved = {}
+        merged = {**DEFAULT_SETTINGS, **{k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}}
+        merged["schedule"] = {**DEFAULT_SETTINGS["schedule"], **(saved.get("schedule") or {})}
+        return merged
+
+    def update_settings(self, changes: dict, now: int | None = None) -> dict:
+        current = self.settings()
+        for key in ("model",):
+            if key in changes:
+                current[key] = str(changes[key] or "")[:120]
+        for key in ("dry_run", "onboarded"):
+            if key in changes:
+                current[key] = bool(changes[key])
+        if "schedule" in changes:
+            sched = {**current["schedule"], **(changes["schedule"] or {})}
+            if sched.get("frequency") not in FREQUENCIES:
+                raise ValueError("Unknown schedule frequency")
+            sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
+            sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            # Only slots after this moment count, so saving a schedule never fires a missed past slot.
+            sched["anchor"] = int(now if now is not None else time.time())
+            current["schedule"] = sched
+        write_private(self.dir / "settings.json", json.dumps(current, sort_keys=True))
+        return current
+
+    # -- Jev key (per account, so a hosted server never pays for users' Jev) --
+    def jev_key(self) -> str:
+        try:
+            return str(json.loads((self.dir / "secrets.json").read_text(encoding="utf-8")).get("TYPESAFE_API_KEY", ""))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return ""
+
+    def save_jev_key(self, key: str) -> None:
+        write_private(self.dir / "secrets.json", json.dumps({"TYPESAFE_API_KEY": key} if key else {}))
+
+    # -- preferences ------------------------------------------------------
+    def preferences(self) -> prefs_mod.Preferences:
+        return prefs_mod.load(self.dir / "preferences.json")
+
+    def save_preferences(self, prefs: prefs_mod.Preferences) -> None:
+        write_private(self.dir / "preferences.json", json.dumps(prefs.to_json(), sort_keys=True))
+
+    # -- run history ------------------------------------------------------
+    def record_run(self, entry: dict) -> None:
+        path = self.dir / "runs.jsonl"
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as file:
+            file.write(json.dumps(entry, separators=(",", ":"), sort_keys=True) + "\n")
+
+    def runs(self, limit: int = 50) -> list[dict]:
+        path = self.dir / "runs.jsonl"
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text(encoding="utf-8").splitlines()[-limit:]:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return list(reversed(out))
+
+    def last_scheduled_run(self) -> int:
+        return max((int(r.get("started", 0)) for r in self.runs(500) if r.get("trigger") == "schedule"), default=0)
+
+    def decisions(self, limit: int = 50) -> list[dict]:
+        """Latest verified label decisions (IDs and labels only; no message content is stored)."""
+        from .runner import load_events
+        events = [e for e in load_events(self.dir / "events.jsonl").values() if e.get("status") == "verified"]
+        events.sort(key=lambda e: int(e.get("ts", 0)), reverse=True)
+        return events[:limit]
+
+    def is_due(self, now: int | None = None, tz: tzinfo | None = None) -> bool:
+        now = int(now if now is not None else time.time())
+        sched = self.settings()["schedule"]
+        slot = latest_slot(sched, now, tz)
+        return slot is not None and slot > max(int(sched.get("anchor", 0)), self.last_scheduled_run())
+
+    def next_run(self, now: int | None = None, tz: tzinfo | None = None) -> int | None:
+        now = int(now if now is not None else time.time())
+        sched = self.settings()["schedule"]
+        if sched["frequency"] == "off":
+            return None
+        # Walk forward local hour by local hour (at most ~32 days) to the next slot.
+        probe = _local(now, tz).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        for _ in range(24 * 32):
+            ts = int(probe.timestamp())
+            if latest_slot(sched, ts, tz) == ts:
+                return ts
+            probe += timedelta(hours=1)
+        return None
+
+
+def _local(ts: int, tz: tzinfo | None) -> datetime:
+    return datetime.fromtimestamp(ts, tz) if tz else datetime.fromtimestamp(ts).astimezone()
+
+
+def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
+    """The most recent scheduled moment at or before ``now`` (epoch seconds)."""
+    freq = sched.get("frequency", "off")
+    if freq == "off":
+        return None
+    local = _local(now, tz)
+    hour = int(sched.get("hour", 7))
+    if freq == "hourly":
+        slot = local.replace(minute=0, second=0, microsecond=0)
+    elif freq == "daily":
+        slot = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if slot > local:
+            slot -= timedelta(days=1)
+    elif freq == "weekly":
+        slot = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        slot -= timedelta(days=(slot.weekday() - int(sched.get("weekday", 0))) % 7)
+        if slot > local:
+            slot -= timedelta(days=7)
+    elif freq == "monthly":  # last day of the month
+        def last_day(year: int, month: int) -> datetime:
+            return local.replace(year=year, month=month, day=calendar.monthrange(year, month)[1],
+                                 hour=hour, minute=0, second=0, microsecond=0)
+        slot = last_day(local.year, local.month)
+        if slot > local:
+            year, month = (local.year, local.month - 1) if local.month > 1 else (local.year - 1, 12)
+            slot = last_day(year, month)
+    else:
+        return None
+    return int(slot.timestamp())
+
+
+def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
+                runner_kwargs: dict | None = None, now: int | None = None) -> dict:
+    """Run triage in batches until the window is done (bounded), and record history."""
+    from . import runner
+    started = int(now if now is not None else time.time())
+    acct = Account(state_root, account)
+    totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0, "outcomes": {}}
+    entry = {"started": started, "trigger": trigger, "days": days}
+    try:
+        for _ in range(MAX_BATCHES):
+            result = runner.run(account, root=state_root, since_days=days, now=now, **(runner_kwargs or {}))
+            for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures"):
+                totals[key] += int(result.get(key, 0))
+            for key, value in result.get("outcomes", {}).items():
+                totals["outcomes"][key] = totals["outcomes"].get(key, 0) + value
+            totals.update({k: result[k] for k in ("mode", "remaining") if k in result})
+            if not result.get("remaining") or result.get("mode") == "dry-run" or not result.get("processed"):
+                break
+        entry.update(status="ok", **totals)
+    except Exception as exc:
+        entry.update(status="error", error=type(exc).__name__, message=str(exc)[:300], **totals)
+        raise
+    finally:
+        entry["finished"] = int(time.time()) if now is None else started
+        acct.record_run(entry)
+    return entry

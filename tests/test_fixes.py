@@ -11,9 +11,7 @@ from inbox_triage.gmail.client import GmailClient, HistoryExpired
 from inbox_triage.models import ContextPack, Destination, JevSignals, MailEvidence
 from inbox_triage.policy import decide
 from inbox_triage.providers import ProviderError, make_provider
-from inbox_triage.providers.base import parse_answers, questions, yes_probability
-from inbox_triage.providers.llm import OpenAICompatibleProvider, answer_schema
-from inbox_triage.providers.rules import RulesProvider
+from inbox_triage.providers.base import parse_answers, questions
 from inbox_triage.store import TriageStore
 
 NOW = 2_000_000_000
@@ -111,59 +109,6 @@ def test_partial_journal_line_is_ignored_and_compaction_drops_old(tmp_path):
     assert journal.stat().st_mode & 0o077 == 0
 
 
-def test_yes_probability_and_answer_validation():
-    assert yes_probability("yes", .9) == .9
-    assert yes_probability("no", .9) == pytest.approx(.1)
-    assert yes_probability("yes", .4) == 0.0
-    good = {k: {"choice": "no", "confidence": .9} for k in questions()}
-    good["category"] = {"choice": "update", "confidence": .8}
-    assert parse_answers(good).category == "update"
-    with pytest.raises(ProviderError):
-        parse_answers({**good, "deceptive": {"choice": "maybe", "confidence": .5}})
-    with pytest.raises(ProviderError):
-        parse_answers({**good, "deceptive": {"choice": "no", "confidence": True}})
-
-
-def test_answer_schema_requires_every_question():
-    qs = questions()
-    schema = answer_schema(qs)
-    assert set(schema["required"]) == set(qs) and schema["additionalProperties"] is False
-    assert schema["properties"]["category"]["properties"]["choice"]["enum"] == sorted(qs["category"]["criteria"])
-
-
-def test_openai_compatible_provider_parses_structured_reply(monkeypatch):
-    answers = {k: {"choice": "no", "confidence": .9} for k in questions()}
-    answers["category"] = {"choice": "low_priority", "confidence": .9}
-    answers["unsolicited_bulk"] = {"choice": "yes", "confidence": .95}
-    p = OpenAICompatibleProvider(model="local-test", base_url="http://localhost:1/v1", api_key="")
-    sent = {}
-    def post(body):
-        sent.update(body)
-        return {"choices": [{"message": {"content": json.dumps(answers)}}], "usage": {"prompt_tokens": 7}}
-    monkeypatch.setattr(p, "_post", post)
-    signals, usage = p.classify_with_usage(MailEvidence("secret-id", subject="Sale"), ContextPack())
-    assert signals.unsolicited_bulk == .95 and usage["input_tokens"] == 7
-    assert "secret-id" not in json.dumps(sent)
-
-
-def test_provider_factory_validation(monkeypatch):
-    monkeypatch.delenv("INBOX_TRIAGE_MODEL", raising=False)
-    with pytest.raises(ProviderError):
-        make_provider("openai")
-    with pytest.raises(ProviderError):
-        make_provider("nope")
-    assert isinstance(make_provider("rules"), RulesProvider)
-
-
-def test_rules_provider_only_flags_categorized_bulk():
-    promo = MailEvidence("m", labels=frozenset({"CATEGORY_PROMOTIONS"}), bulk=True, list_unsubscribe=True)
-    s, _ = RulesProvider().classify_with_usage(promo, ContextPack())
-    assert decide(promo, ContextPack(), s).destination == Destination.LATER
-    personal = MailEvidence("m", subject="lunch?")
-    s, _ = RulesProvider().classify_with_usage(personal, ContextPack())
-    assert decide(personal, ContextPack(), s).destination == Destination.UNCHANGED
-
-
 class FakeMessages:
     def __init__(self):
         self.labels = {"INBOX"}
@@ -239,6 +184,10 @@ def test_cli_multi_account_discovery(tmp_path, monkeypatch, capsys):
     assert runner.discover_accounts(tmp_path / "cfg") == ["a@example.org", "b@example.org"]
     seen = []
     monkeypatch.setattr(runner, "run", lambda account, token, root, **kw: seen.append((account, token)) or {"account": account})
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    assert runner.main(["--all", "--config-dir", str(tmp_path / "cfg"), "--state-dir", str(tmp_path / "s")]) == 1
+    assert "console.typesafe.ai" in capsys.readouterr().err and not seen  # no Jev, no run
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-only")
     assert runner.main(["--all", "--config-dir", str(tmp_path / "cfg"), "--state-dir", str(tmp_path / "s")]) == 0
     assert [a for a, _ in seen] == ["a@example.org", "b@example.org"]
     assert seen[0][1] == tokens / "a@example.org.json"
@@ -246,25 +195,105 @@ def test_cli_multi_account_discovery(tmp_path, monkeypatch, capsys):
     assert "No token" in capsys.readouterr().err
 
 
-def test_anthropic_provider_request_shape():
-    anthropic = pytest.importorskip("anthropic")
-    httpx2 = pytest.importorskip("httpx2")
-    from inbox_triage.providers.llm import AnthropicProvider
-    answers = {k: {"choice": "no", "confidence": .9} for k in questions()}
-    answers["category"] = {"choice": "update", "confidence": .8}
-    seen = {}
-    def handler(request):
-        seen["beta"] = request.headers.get("anthropic-beta")
-        seen["body"] = json.loads(request.content)
-        return httpx2.Response(200, json={
-            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5",
-            "content": [{"type": "text", "text": json.dumps(answers)}], "stop_reason": "end_turn",
-            "stop_sequence": None, "usage": {"input_tokens": 12, "output_tokens": 3}})
-    provider = AnthropicProvider(api_key="test-only")
-    provider.client = anthropic.Anthropic(api_key="test-only", http_client=anthropic.DefaultHttpxClient(
-        transport=httpx2.MockTransport(handler)))
-    signals, usage = provider.classify_with_usage(MailEvidence("secret-id", subject="Statement"), ContextPack())
-    assert signals.category == "update" and usage == {"input_tokens": 12, "output_tokens": 3}
-    assert seen["beta"] == "server-side-fallback-2026-07-01" and seen["body"]["fallbacks"] == "default"
-    assert seen["body"]["output_config"]["format"]["type"] == "json_schema"
-    assert "secret-id" not in json.dumps(seen["body"])
+def jev_answers(**overrides):
+    answers = {k: {"type": "noul", "noul": .05} for k, q in questions().items() if q["type"] == "noul"}
+    answers["category"] = {"type": "choice", "choice": "update", "probabilities": {"update": .8}, "confidence": .8}
+    answers.update(overrides)
+    return answers
+
+
+def test_jev_questions_use_native_noul_and_parse_probabilities():
+    qs = questions()
+    assert qs["requires_action"]["type"] == "noul" and set(qs["requires_action"]["criteria"]) == {"true", "false"}
+    assert qs["topic_shopping"]["type"] == "noul" and qs["category"]["type"] == "choice"
+    signals = parse_answers(jev_answers(deceptive={"type": "noul", "noul": .93}))
+    assert signals.deceptive == .93 and signals.requires_action == .05 and signals.category == "update"
+    # Confidence may be omitted: fall back to the chosen option's probability.
+    signals = parse_answers(jev_answers(category={"type": "choice", "choice": "spam", "probabilities": {"spam": .7}}))
+    assert signals.category_confidence == .7
+    for bad in ({"type": "noul", "noul": 1.5}, {"type": "noul", "noul": True}, {"type": "choice", "choice": "yes"}):
+        with pytest.raises(ProviderError):
+            parse_answers(jev_answers(deceptive=bad))
+
+
+def test_jev_is_the_only_classifier_and_needs_a_key(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(ProviderError, match="console.typesafe.ai"):
+        make_provider("jev")
+    with pytest.raises(ProviderError, match="Jev only"):
+        make_provider("openai", api_key="k")
+
+
+class _Resp:
+    def __init__(self, data): self.data = data
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def read(self): return json.dumps(self.data).encode()
+
+
+def test_jev_retries_overloaded_529_then_succeeds(monkeypatch):
+    import urllib.error
+    import urllib.request
+    import inbox_triage.providers.jev as jev_mod
+    monkeypatch.setattr(jev_mod.time, "sleep", lambda s: None)
+    calls = []
+    def urlopen(req, timeout):
+        calls.append(json.loads(req.data))
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 529, "overloaded", {}, None)
+        return _Resp({"answers": jev_answers(), "usage": {"input_tokens": 90}})
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    p = make_provider("jev", api_key="test-only")
+    signals, usage = p.classify_with_usage(MailEvidence("secret-id", subject="Statement"), ContextPack())
+    assert len(calls) == 2 and signals.category == "update" and usage["input_tokens"] == 90
+    assert calls[0]["model"] == "jev-latest" and "secret-id" not in json.dumps(calls[0])
+
+
+def test_jev_verify_reports_bad_key(monkeypatch):
+    import urllib.error
+    import urllib.request
+    def urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(ProviderError) as exc:
+        make_provider("jev", api_key="wrong").verify()
+    assert exc.value.status == 401
+
+
+def test_assistant_uses_deepseek_via_openrouter_with_json_mode_fallback(monkeypatch):
+    import urllib.error
+    import urllib.request
+    from inbox_triage import onboarding
+    from inbox_triage.assistant import Assistant
+    monkeypatch.delenv("INBOX_TRIAGE_ASSIST_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    with pytest.raises(ProviderError, match="OpenRouter"):
+        Assistant("")
+    bodies, headers = [], []
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        bodies.append(body); headers.append(dict(req.header_items()))
+        if body["response_format"]["type"] == "json_schema":
+            raise urllib.error.HTTPError(req.full_url, 404, "no endpoint", {}, None)
+        return _Resp({"choices": [{"message": {"content": json.dumps({"summary": "School matters.", "rules": [
+            {"kind": "domain", "value": "school.example", "action": "important", "note": "kids"}]})}}]})
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    prefs = onboarding.interpret(Assistant("test-only"), "#1 is my kids' school",
+                                 [{"from": "Office <o@school.example>", "domain": "school.example", "subject": "Trip"}])
+    assert prefs.rules[0].value == "school.example" and prefs.summary == "School matters."
+    assert bodies[0]["model"] == "deepseek/deepseek-v4.1-flash" and bodies[0]["provider"] == {"require_parameters": True}
+    assert bodies[1]["response_format"] == {"type": "json_object"} and "provider" not in bodies[1]
+    assert headers[0]["Authorization"] == "Bearer test-only"
+    assert "untrusted" in bodies[0]["messages"][0]["content"]
+
+
+def test_dotenv_loads_known_keys_without_overriding(tmp_path, monkeypatch):
+    from inbox_triage import config
+    env = tmp_path / ".env"
+    env.write_text("export TYPESAFE_API_KEY='from-file'\nOPENROUTER_API_KEY=keep\nPATH=/evil\n# comment\n")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "already-set")
+    config.load_dotenv(env)
+    import os
+    assert os.environ["TYPESAFE_API_KEY"] == "from-file" and os.environ["OPENROUTER_API_KEY"] == "already-set"
+    assert os.environ["PATH"] != "/evil"
