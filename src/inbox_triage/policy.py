@@ -12,6 +12,9 @@ class Thresholds:
     later: float = .92
     spam: float = .98
     topic: float = .82
+    # Any real deception signal blocks attention labels: a phish saying
+    # "Action required" must never be promoted to Needs You or Updates.
+    suspicious: float = .6
 
 # Broad words in newsletter bodies ("account", "doctor", "order") are not
 # evidence of a personal service update. Prefer abstention to a false Updates
@@ -39,6 +42,8 @@ def decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds = Thres
     topics = TopicDecision(tuple(sorted(topic_scores)), topic_scores)
     protected = bool(e.protected_kinds or e.user_replied or "IMPORTANT" in e.labels or "CATEGORY_UPDATES" in e.labels or c.thread_participation or c.recent_purchase or c.active_subscription or c.similar_replied or c.sender_relationship in {"active_thread", "known_person"})
     promotional = bool(_PROMOTIONAL_SUBJECT.search(e.subject))
+    if s.deceptive >= t.suspicious:
+        return RoutingDecision(Destination.UNCHANGED, "Possible deception; the message is left untouched for your judgement.", s.deceptive, topics)
     if not promotional and max(s.requires_action, s.human_waiting) >= t.action:
         return RoutingDecision(Destination.NEEDS_YOU, "A reply, decision, deadline, or fix appears necessary.", max(s.requires_action, s.human_waiting), topics)
     if personal_event_subject(e) and (e.protected_kinds or s.service_update >= t.update):

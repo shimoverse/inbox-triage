@@ -8,6 +8,7 @@ from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Iterable
 
+from .gmail.client import HistoryExpired
 from .models import ContextPack, MailEvidence
 from .store import TriageStore
 
@@ -24,6 +25,12 @@ _TOPIC_PATTERNS = {
     "work_projects": re.compile(r"\b(project|proposal|contract|client|meeting)\b", re.I),
 }
 _PURCHASE = re.compile(r"\b(order(?: confirmation)?|receipt|purchase|shipment|delivery|return|refund|invoice)\b", re.I)
+# Gmail search: `{a b}` is OR; `(a b)` would require every word.
+PURCHASE_QUERY = ('-in:spam -in:trash newer_than:{days}d '
+                  '(subject:{{order receipt purchase shipment delivery return refund invoice}} OR "order confirmation")')
+# Consumer mailbox domains are shared by millions of senders, so they never prove a purchase relationship.
+FREEMAIL = frozenset({"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
+                      "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com"})
 
 @dataclass(frozen=True)
 class ContextSyncStats:
@@ -33,6 +40,7 @@ class ContextSyncStats:
     history_pages: int = 0
     cursor_advanced: bool = False
     history_truncated: bool = False
+    history_expired: bool = False
 
 
 def _headers(message: dict) -> dict[str, str]:
@@ -66,11 +74,14 @@ def learn_message(store: TriageStore, account: str, message: dict, now: int) -> 
             store.put_fact(account, "person", address, when, when + RELATIONSHIP_TTL)
             for topic in topics:
                 store.put_fact(account, "person", address, when, when + RELATIONSHIP_TTL, topic)
+    if labels & {"SENT", "SPAM", "TRASH"}:
+        return
     sender = parseaddr(headers.get("from", ""))[1].casefold()
     domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
-    # A purchase is treated as verified only when Gmail search selected the record and
-    # the fetched header independently has concrete transaction language.
-    if domain and _PURCHASE.search(subject):
+    # A purchase needs transaction language from a DMARC-aligned, non-freemail sender;
+    # otherwise any phisher could mint "recent purchase" protection for their domain.
+    dmarc_pass = bool(re.search(r"\bdmarc=pass\b", headers.get("authentication-results", ""), re.I))
+    if domain and domain not in FREEMAIL and dmarc_pass and _PURCHASE.search(subject):
         store.put_fact(account, "purchase_domain", domain, when, when + PURCHASE_TTL, "shopping")
         if thread:
             store.put_fact(account, "purchase_thread", thread, when, when + PURCHASE_TTL, "shopping")
@@ -80,9 +91,7 @@ def bootstrap_context(client, store: TriageStore, account: str, *, days: int, ma
                       max_purchases: int, now: int | None = None) -> ContextSyncStats:
     now = int(now if now is not None else datetime.now(timezone.utc).timestamp())
     sent = list(client.iter_metadata(f"in:sent newer_than:{days}d", max_sent))
-    purchases = list(client.iter_metadata(
-        f'in:anywhere newer_than:{days}d (subject:(order receipt purchase shipment delivery return refund invoice) OR "order confirmation")',
-        max_purchases))
+    purchases = list(client.iter_metadata(PURCHASE_QUERY.format(days=days), max_purchases))
     for message in sent:
         learn_message(store, account, message, now)
     for message in purchases:
@@ -100,15 +109,25 @@ def sync_incremental(client, store: TriageStore, account: str, *, target_history
         return ContextSyncStats(cursor_advanced=True)
     pages = messages = 0
     truncated = False
-    for page in client.iter_history(cursor, max_pages=max_pages, page_size=page_size):
-        pages += 1
-        for message in page.get("messages", []):
-            learn_message(store, account, message, now); messages += 1
-        if page.get("truncated"):
-            truncated = True
+    last = ""
+    try:
+        for page in client.iter_history(cursor, max_pages=max_pages, page_size=page_size):
+            pages += 1
+            for message in page.get("messages", []):
+                learn_message(store, account, message, now); messages += 1
+            last = page.get("last_history_id") or last
+            if page.get("truncated"):
+                truncated = True
+    except HistoryExpired:
+        # Gmail keeps history for roughly a week; after that a full resync is required.
+        store.set_cursor(account, "")
+        return ContextSyncStats(history_expired=True)
     advanced = not truncated
     if advanced:
         store.set_cursor(account, target_history_id)
+    elif last:
+        # Resume after the processed pages next run instead of rereading them forever.
+        store.set_cursor(account, last)
     store.prune_context(account, now)
     return ContextSyncStats(history_messages=messages, history_pages=pages,
                             cursor_advanced=advanced, history_truncated=truncated)
@@ -137,7 +156,11 @@ def relevant_priorities(evidence: MailEvidence, path: str | Path, now: int) -> t
     """Only send explicitly matching, nonexpired, private topic names to Jev."""
     file = Path(path)
     if not file.exists(): return ()
-    data = json.loads(file.read_text())
+    try:
+        data = json.loads(file.read_text())
+    except (OSError, json.JSONDecodeError):
+        raise ValueError(f"Could not parse priorities file {file}") from None
+    if not isinstance(data, dict): return ()
     haystack = " ".join((evidence.subject, evidence.excerpt, evidence.sender_domain)).casefold()
     matches = []
     for item in data.get("priorities", []):

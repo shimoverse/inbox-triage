@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from inbox_triage import runner
+from inbox_triage.context import ContextSyncStats
 from inbox_triage.models import ContextPack, Destination, JevSignals, MailEvidence
 from inbox_triage.policy import decide
 from inbox_triage.providers.lean_jev import LeanJevProvider
@@ -14,10 +15,10 @@ class FakeMessages:
         self.labels = {"INBOX", "STARRED"}
         self.calls = []
     def get(self, **kwargs):
-        return SimpleNamespace(execute=lambda: {"labelIds": sorted(self.labels)})
+        return SimpleNamespace(execute=lambda **kw: {"labelIds": sorted(self.labels)})
     def modify(self, **kwargs):
         self.calls.append(kwargs["body"])
-        def execute():
+        def execute(**_):
             self.labels.update(kwargs["body"]["addLabelIds"])
             self.labels.difference_update(kwargs["body"]["removeLabelIds"])
         return SimpleNamespace(execute=execute)
@@ -33,7 +34,7 @@ def test_label_only_preserves_native_labels_and_reads_back():
 
 def test_readback_mismatch_stops():
     messages = FakeMessages()
-    messages.modify = lambda **kwargs: SimpleNamespace(execute=lambda: None)
+    messages.modify = lambda **kwargs: SimpleNamespace(execute=lambda **kw: None)
     client = SimpleNamespace(service=SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages)))
     with pytest.raises(RuntimeError, match="readback mismatch"):
         runner.apply_labels(client, "sample", {"Triage/For You"}, {"Triage/For You": "custom1"})
@@ -78,7 +79,7 @@ def test_live_runner_verifies_account_and_resumes_without_new_model_call(tmp_pat
     messages = FakeMessages()
     service = SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages))
     class Client:
-        def __init__(self, token): self.service = service
+        def __init__(self, token, **kw): self.service = service
         def profile(self): return {"emailAddress": "a@example.org", "historyId": "8"}
         def _get(self, mid, *, full): return {"id": mid, "payload": {"mimeType": "text/plain", "headers": []}}
         def attachment_data(self, mid, aid): return ""
@@ -90,9 +91,9 @@ def test_live_runner_verifies_account_and_resumes_without_new_model_call(tmp_pat
     monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
     monkeypatch.setattr(runner, "list_ids", lambda client, query: ["synthetic-id"])
     monkeypatch.setattr(runner, "ensure_labels", lambda client: {name: "custom1" if name == "Triage/For You" else name for name in runner.LABELS})
-    monkeypatch.setattr(runner, "LeanJevProvider", Provider)
+    monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: Provider())
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
-    monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
     monkeypatch.setattr(runner, "build_context", lambda *a, **kw: ContextPack())
     with pytest.raises(RuntimeError, match="account mismatch"):
         runner.run("b@example.org", tmp_path / "token.json", tmp_path / "state", now=2_000_000)
