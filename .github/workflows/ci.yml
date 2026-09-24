@@ -22,4 +22,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --dev --extra anthropic
       - run: uv run pytest -q
-      - run: uv run inbox-triage --help && uv run inbox-triage-auth --help
+      - run: uv run inbox-triage --help && uv run inbox-triage-auth --help && uv run inbox-triage-web --help
+      - run: node --check src/inbox_triage/web/static/app.js

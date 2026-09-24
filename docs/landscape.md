@@ -19,10 +19,19 @@ Inbox Triage is deliberately narrow: a local, label-only, conservative sorter. H
 - **Multi-account by default:** per-account token discovery (`--all`) and Workspace domain-wide delegation.
 - **Hardened context:** purchase facts require DMARC-aligned, non-freemail senders and never come from Sent, Spam, or Trash.
 
+## Added since (web app release)
+
+- **Web app with Google sign-in** (PKCE), guided onboarding, a dashboard, run history, and schedules (hourly, daily, weekly, last day of the month).
+- **Onboarding "ramble"**: users tag recent emails or type or dictate what matters, and an LLM turns that into reviewable sender, domain, and keyword rules that the local policy applies safely.
+- **OpenRouter and OpenAI presets** alongside Claude, Ollama, Jev, and offline rules.
+- **Operator-level Google setup** ([hosting.md](hosting.md)), so end users never create a Cloud project.
+
 ## Roadmap (not yet implemented)
 
 1. **Evaluation harness:** `inbox-triage eval` over a synthetic labeled JSONL set, to compare providers, models, and thresholds before changing defaults.
-2. **Learn from corrections:** detect when the user removes or changes one of our labels (History API `labelRemoved`) and use it as a local sender override or few-shot example.
+2. **Learn from corrections:** (partly covered by onboarding rules) detect when the user removes or changes one of our labels (History API `labelRemoved`) and use it as a local sender override or few-shot example.
 3. **Sender priors:** if most recent mail from a sender got the same verified label, use that as a signal. Explicit rules still win.
 4. **Push instead of polling (optional):** Gmail `users.watch` with Pub/Sub for near-real-time triage. This needs a public webhook or pull subscription and daily watch renewal, so polling stays the default for a local CLI.
 5. **Model cascade:** a cheap or local model first, escalating to a stronger model only when confidence is low.
+6. **Apps Script edition:** zero-setup install that runs inside the user's own Google account.
+7. **Desktop packaging:** a signed app bundle with the maintainer's OAuth client, running as a login item.

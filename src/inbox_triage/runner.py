@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from googleapiclient.errors import HttpError
 
+from . import preferences
 from .context import bootstrap_context, build_context, sync_incremental
 from .gmail.client import GmailClient
 from .gmail.extract import extract_gmail_message
@@ -34,9 +36,9 @@ EXCLUDED = {"SENT", "DRAFT", "SPAM", "TRASH"}
 MAX_PER_RUN = 100
 MAX_ATTEMPTS = 3            # a message that fails this often is left unchanged for good
 MAX_CONSECUTIVE_FAILURES = 5  # this many in a row means the provider is down: stop the run
-JOURNAL_RETENTION = 30 * 86400
-CONFIG_DIR = Path.home() / ".config/inbox-triage"
-STATE_DIR = Path.home() / ".local/share/inbox-triage"
+MAX_WINDOW_DAYS = 90
+JOURNAL_RETENTION = (MAX_WINDOW_DAYS + 5) * 86400
+from .config import CONFIG_DIR, STATE_DIR  # noqa: E402
 # Kept as a module attribute so tests can substitute a fake client.
 GmailReadOnlyClient = GmailClient
 
@@ -56,8 +58,9 @@ def scoped_directory(root: Path, account: str) -> Path:
     return root / hashlib.sha256(account.casefold().encode()).hexdigest()[:24]
 
 
-def scan_query(cursor: int, launch: int) -> str:
-    return f"after:{max(0, launch, cursor - 2 * 86400)} -in:sent -in:drafts -in:spam -in:trash"
+def scan_query(cursor: int, launch: int, since: int | None = None) -> str:
+    start = since if since is not None else max(launch, cursor - 2 * 86400)
+    return f"after:{max(0, start)} -in:sent -in:drafts -in:spam -in:trash"
 
 
 def list_ids(client: GmailClient, query: str) -> list[str]:
@@ -160,11 +163,15 @@ def desired_names(decision) -> set[str]:
     return names
 
 
-def run(account: str, token: Path | None, root: Path, *, max_messages: int = MAX_PER_RUN,
+def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_messages: int = MAX_PER_RUN,
         dry_run: bool = False, now: int | None = None, provider: str = "jev", model: str | None = None,
-        service_account: Path | None = None) -> dict:
+        service_account: Path | None = None, since_days: int | None = None, api_key: str | None = None) -> dict:
+    """Triage one batch. ``since_days`` rescans that many past days (skipping verified mail)
+    instead of continuing from the checkpoint."""
     if not 1 <= max_messages <= MAX_PER_RUN:
         raise ValueError("max_messages must be between 1 and 100")
+    if since_days is not None and not 1 <= since_days <= MAX_WINDOW_DAYS:
+        raise ValueError(f"since_days must be between 1 and {MAX_WINDOW_DAYS}")
     now = int(now if now is not None else time.time())
     root = root.expanduser()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -173,7 +180,8 @@ def run(account: str, token: Path | None, root: Path, *, max_messages: int = MAX
     directory.mkdir(mode=0o700, exist_ok=True)
     os.chmod(directory, 0o700)
     with account_lock(directory / ".lock"):
-        return _run_locked(account, token, directory, max_messages, dry_run, now, provider, model, service_account)
+        return _run_locked(account, token, directory, max_messages, dry_run, now, provider, model, service_account,
+                           since_days, api_key)
 
 
 def _client(token: Path | None, account: str, service_account: Path | None):
@@ -184,7 +192,8 @@ def _client(token: Path | None, account: str, service_account: Path | None):
 
 def _run_locked(account: str, token: Path | None, directory: Path, max_messages: int,
                 dry_run: bool, now: int, provider_name: str = "jev", model: str | None = None,
-                service_account: Path | None = None) -> dict:
+                service_account: Path | None = None, since_days: int | None = None,
+                api_key: str | None = None) -> dict:
     client = _client(token, account, service_account)
     profile = client.profile()
     if profile["emailAddress"].casefold() != account.casefold():
@@ -195,9 +204,11 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
     if state["account"].casefold() != account.casefold():
         raise RuntimeError("State belongs to a different account")
     events = load_events(journal)
-    ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"])))
+    since = now - since_days * 86400 if since_days else None
+    ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
     labels = None if dry_run else ensure_labels(client)
-    provider = make_provider(provider_name, model)
+    provider = make_provider(provider_name, model, api_key=api_key)
+    prefs = preferences.load(directory / "preferences.json")
     outcomes, seen, calls, changed, failures = Counter(), 0, 0, 0, 0
     tokens = Counter()
     consecutive = 0
@@ -239,6 +250,8 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                 else:
                     context = build_context(store, account, evidence, now=now,
                                             priorities_path=directory / "priorities.json")
+                    if prefs.summary:
+                        context = dataclasses.replace(context, user_notes=prefs.summary)
                     try:
                         signals, usage = provider.classify_with_usage(evidence, context)
                     except ProviderError:
@@ -258,7 +271,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                     consecutive = 0
                     calls += 1
                     tokens.update(usage)
-                    decision = decide(evidence, context, signals)
+                    decision = decide(evidence, context, signals, preference=preferences.match(prefs, evidence))
                     proposed = {"id": mid, "status": "classified",
                                 "destination": decision.destination.value,
                                 "names": sorted(desired_names(decision))}
@@ -270,7 +283,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                 record({**previous, "status": "verified"})
             outcomes[previous["destination"]] += 1
     if complete and not dry_run:
-        state["cursor_epoch"] = now
+        state["cursor_epoch"] = max(now, int(state["cursor_epoch"])) if since_days else now
         save_state(state_path, state)
         compact_events(journal, events, now)
     return {"account": account, "mode": "dry-run" if dry_run else "label-only", "provider": provider_name,
@@ -281,34 +294,48 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
 
 
 def main(argv=None) -> int:
+    from .accounts import Account, run_account
+    from .config import resolve_provider
     parser = argparse.ArgumentParser(description="Private Gmail triage; label-only unless --dry-run")
     who = parser.add_mutually_exclusive_group(required=True)
     who.add_argument("--account", action="append", help="Gmail address to triage (repeatable)")
-    who.add_argument("--all", action="store_true", help="Triage every account connected with inbox-triage-auth")
+    who.add_argument("--all", action="store_true", help="Triage every connected account")
     parser.add_argument("--token", type=Path, help="OAuth token JSON (default: <config-dir>/tokens/<account>.json)")
     parser.add_argument("--service-account", type=Path,
                         help="Workspace service-account key with domain-wide delegation (instead of --token)")
     parser.add_argument("--config-dir", type=Path, default=CONFIG_DIR)
     parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
-    parser.add_argument("--provider", choices=PROVIDERS, default=os.environ.get("INBOX_TRIAGE_PROVIDER", "jev"))
-    parser.add_argument("--model", help="Provider model override (required for --provider openai)")
-    parser.add_argument("--max", type=int, default=MAX_PER_RUN, help="Messages per account per run (1-100)")
+    parser.add_argument("--provider", choices=PROVIDERS,
+                        help="Default: the account's setting from the web app, else INBOX_TRIAGE_PROVIDER, else jev")
+    parser.add_argument("--model", help="Provider model override")
+    parser.add_argument("--max", type=int, default=MAX_PER_RUN, help="Messages per batch (1-100)")
+    parser.add_argument("--days", type=int, help=f"Rescan the last N days (1-{MAX_WINDOW_DAYS}) instead of continuing")
+    parser.add_argument("--due", action="store_true",
+                        help="Only run accounts whose schedule (set in the web app) is due; for an hourly cron job")
     parser.add_argument("--dry-run", action="store_true", help="Classify only; never change Gmail")
     parser.add_argument("--verbose", action="store_true", help="Include error messages (may contain Gmail IDs)")
     args = parser.parse_args(argv)
     accounts = discover_accounts(args.config_dir) if args.all else args.account
     if not accounts:
-        parser.error(f"No connected accounts in {args.config_dir.expanduser() / 'tokens'}; run inbox-triage-auth first")
+        parser.error(f"No connected accounts in {args.config_dir.expanduser() / 'tokens'}; "
+                     "run inbox-triage-web or inbox-triage-auth first")
     if args.token and len(accounts) > 1:
         parser.error("--token applies to one account; omit it to use per-account default tokens")
     status = 0
     for account in accounts:
         token = None if args.service_account else (args.token or default_token(account, args.config_dir))
         try:
+            settings = Account(args.state_dir, account).settings()
+            if args.due and not Account(args.state_dir, account).is_due():
+                continue
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
-            result = run(account, token, args.state_dir, max_messages=args.max, dry_run=args.dry_run,
-                         provider=args.provider, model=args.model, service_account=args.service_account)
+            provider, model, api_key = resolve_provider(settings, args.provider, args.model, args.config_dir)
+            result = run_account(account, args.state_dir, trigger="schedule" if args.due else "cli", days=args.days,
+                                 runner_kwargs={"token": token, "max_messages": args.max,
+                                                "dry_run": args.dry_run or bool(settings.get("dry_run")),
+                                                "provider": provider, "model": model, "api_key": api_key or None,
+                                                "service_account": args.service_account})
             print(json.dumps(result, sort_keys=True))
         except Exception as exc:
             # By default never print provider responses, message metadata, IDs, or credentials.

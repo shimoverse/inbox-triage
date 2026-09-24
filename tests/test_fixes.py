@@ -268,3 +268,45 @@ def test_anthropic_provider_request_shape():
     assert seen["beta"] == "server-side-fallback-2026-07-01" and seen["body"]["fallbacks"] == "default"
     assert seen["body"]["output_config"]["format"]["type"] == "json_schema"
     assert "secret-id" not in json.dumps(seen["body"])
+
+
+def test_openrouter_preset_headers_and_json_mode_fallback(monkeypatch):
+    import urllib.error
+    import urllib.request
+    from inbox_triage.providers import make_provider
+    monkeypatch.delenv("INBOX_TRIAGE_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    p = make_provider("openrouter", api_key="test-only")
+    assert p.base_url == "https://openrouter.ai/api/v1" and p.model == "openai/gpt-6-luna"
+    answers = {k: {"choice": "no", "confidence": .9} for k in questions()}
+    answers["category"] = {"choice": "update", "confidence": .8}
+    bodies, headers = [], []
+    class Resp:
+        def __init__(self, data): self.data = data
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return json.dumps(self.data).encode()
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        bodies.append(body); headers.append(dict(req.header_items()))
+        if body["response_format"]["type"] == "json_schema":
+            raise urllib.error.HTTPError(req.full_url, 400, "unsupported", {}, None)
+        return Resp({"choices": [{"message": {"content": json.dumps(answers)}}]})
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    signals, _ = p.classify_with_usage(MailEvidence("id", subject="s"), ContextPack())
+    assert signals.category == "update"
+    assert bodies[0]["provider"] == {"require_parameters": True} and "provider" not in bodies[1]
+    assert bodies[1]["response_format"] == {"type": "json_object"}
+    assert headers[0]["Authorization"] == "Bearer test-only" and headers[0]["X-title"] == "Inbox Triage"
+
+
+def test_openai_and_ollama_presets(monkeypatch):
+    from inbox_triage.providers import make_provider
+    for var in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "INBOX_TRIAGE_MODEL", "OLLAMA_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(ProviderError, match="OPENAI_API_KEY"):
+        make_provider("openai")
+    openai = make_provider("openai", api_key="k")
+    assert openai.base_url == "https://api.openai.com/v1" and openai.model == "gpt-6-luna"
+    ollama = make_provider("ollama")
+    assert ollama.base_url.startswith("http://localhost:11434") and not ollama.api_key

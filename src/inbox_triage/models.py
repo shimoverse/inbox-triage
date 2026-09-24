@@ -49,10 +49,13 @@ class ContextPack:
     similar_read: int = 0
     similar_replied: int = 0
     similar_archived_unread: int = 0
+    user_notes: str = ""
 
     def outbound(self) -> dict:
         # Deliberately coarse: no historical text, addresses, IDs, or timestamps leave the host.
-        return {"sender_relationship": self.sender_relationship,
+        # user_notes is the user's own onboarding summary of what matters to them.
+        extra = {"user_preferences": self.user_notes[:600]} if self.user_notes else {}
+        return {**extra, "sender_relationship": self.sender_relationship,
                 "thread_participation": self.thread_participation,
                 "recent_purchase": self.recent_purchase,
                 "active_subscription": self.active_subscription,
