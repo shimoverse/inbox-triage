@@ -62,7 +62,7 @@ In hosted mode:
 - each person signs in with Google and can only see their own account;
 - **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** any server-wide `TYPESAFE_API_KEY`, so the operator can never end up paying for other users' Jev usage;
 - the OAuth client, the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default), and the contact shown on the built-in privacy policy (`INBOX_TRIAGE_SUPPORT_EMAIL`, `INBOX_TRIAGE_OPERATOR`) come from `/etc/inbox-triage/env`;
-- **optional free-beta limits:** `INBOX_TRIAGE_MAX_ACCOUNTS=100` turns away new sign-ups once 100 accounts exist (returning users always get in, and a turned-away user's Google grant is revoked immediately). `INBOX_TRIAGE_BETA_ENDS=2026-10-31` shows the end date in a banner. The end date is informational: the app keeps running, and you decide what happens next. Counts are never shown to users;
+- **optional free-beta limits:** `INBOX_TRIAGE_MAX_ACCOUNTS=100` turns away new sign-ups once 100 accounts exist (returning users always get in, and a turned-away user's Google grant is revoked immediately). `INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD` (optional, unset by default) adds an end date to the banner. It's informational: the app keeps running, and you decide what happens next. Counts are never shown to users;
 - the app serves its own home page (`/`) and privacy policy (`/privacy`), so the consent screen can use `https://<domain>/` and `https://<domain>/privacy`;
 - **Disconnect account** revokes Google access and deletes all of that user's stored data;
 - the built-in scheduler runs every account's schedule, so run exactly one instance;

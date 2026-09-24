@@ -52,10 +52,9 @@ PUBLIC_URL=https://$DOMAIN
 # Shown on https://$DOMAIN/privacy (the privacy policy URL for Google's consent screen):
 INBOX_TRIAGE_SUPPORT_EMAIL=
 INBOX_TRIAGE_OPERATOR=
-# Free beta: at most this many accounts (Google also caps unverified apps at 100 users), and an
-# informational end date shown in the banner. Leave empty for no limits.
+# Free beta: at most this many accounts (Google also caps unverified apps at 100 users).
+# Leave empty for no limit. Optional: INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD shows an end date in the banner.
 INBOX_TRIAGE_MAX_ACCOUNTS=100
-INBOX_TRIAGE_BETA_ENDS=2026-10-31
 # Google OAuth client ("Web application", redirect https://$DOMAIN/oauth/callback). See docs/google-cloud-setup.md
 INBOX_TRIAGE_OAUTH_CLIENT_ID=
 INBOX_TRIAGE_OAUTH_CLIENT_SECRET=
