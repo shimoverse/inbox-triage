@@ -462,7 +462,7 @@ function settingsCard(a) {
     } catch (err) { toast(err.message); }
   };
   const disconnect = async () => {
-    if (!confirm(`Disconnect ${a.email}? Existing labels stay in Gmail; Inbox Triage stops until you sign in again.`)) return;
+    if (!confirm(`Disconnect ${a.email}? This revokes access and permanently deletes your rules, settings, Jev key and history here. Labels already in Gmail stay.`)) return;
     await api(`accounts/${encodeURIComponent(a.email)}`, "DELETE"); await refresh();
   };
   const assistantBox = el("div", { class: "stack" });

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inbox-triage"
-version = "0.3.0"
+version = "0.4.0"
 description = "Private, label-only Gmail triage powered by Jev: typed decisions, local policy, Gmail labels"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +19,12 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Communications :: Email",
 ]
-dependencies = ["google-api-python-client>=2.0", "google-auth>=2.0", "google-auth-oauthlib>=1.2"]
+# No runtime dependencies: Gmail, OAuth, Jev and the web app use the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# Only for Google Workspace domain-wide delegation (RS256 signing of service-account JWTs).
+workspace = ["google-auth>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/shimoverse/inbox-triage"

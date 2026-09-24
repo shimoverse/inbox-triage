@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy · Inbox Triage</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top"><a class="brand" href="/"><span class="logo" aria-hidden="true"></span>Inbox Triage</a></header>
+  <main class="view prose">
+    <h1>Privacy Policy</h1>
+    <p class="muted">Operated by {{OPERATOR}}. Contact: <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.</p>
+
+    <h2>What Inbox Triage does</h2>
+    <p>Inbox Triage adds labels to incoming Gmail messages (“Triage/Needs You”, “Triage/Updates”, “Triage/For You”,
+      “Triage/Later”, “Topics/Shopping”) on a schedule you choose. It never sends, deletes, archives, forwards, or marks
+      email as read, and never moves email to Spam.</p>
+
+    <h2>Google user data we access</h2>
+    <ul>
+      <li><b>Permission:</b> <code>https://www.googleapis.com/auth/gmail.modify</code>, the narrowest Gmail permission
+        that allows adding labels. It's used only to read received messages, create the five labels above, and add or
+        remove those labels.</li>
+      <li><b>What is read:</b> headers (sender, subject, date, authentication results), message text, and the IDs of
+        messages you sent (to recognise people you correspond with).</li>
+    </ul>
+
+    <h2>How it's used and shared</h2>
+    <ul>
+      <li>For each received email, a short cleaned excerpt (up to 1,000 characters), the subject, the sender's domain
+        and coarse flags are sent to <b>Jev by TypeSafe</b> (typesafe.ai) using <b>your own Jev API key</b>. Jev
+        answers yes/no questions; local rules decide the label. Message IDs, email addresses and attachments are not
+        sent.</li>
+      <li>Only if you click “Turn my notes into rules”, your typed notes and the sender/subject of the emails shown on
+        screen are sent once to an AI model via OpenRouter to propose rules for you to review.</li>
+      <li>We do not sell Google user data, use it for advertising, or use it to train AI models. Human access is
+        limited to what's needed for security or legal obligations, or with your consent.</li>
+      <li>Inbox Triage's use and transfer of information received from Google APIs adheres to the
+        <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data
+        Policy</a>, including the Limited Use requirements.</li>
+    </ul>
+
+    <h2>What is stored</h2>
+    <ul>
+      <li>Your Google OAuth token, your Jev key, your settings, rules and notes summary, run history, the IDs of
+        labeled messages with the labels applied, and hashed (non-reversible) relationship facts.</li>
+      <li>Message bodies and subjects are <b>not</b> stored; the dashboard fetches them live from Gmail.</li>
+      <li>Data is stored on the operator's server with access restricted to the service.</li>
+    </ul>
+
+    <h2>Deleting your data</h2>
+    <p>Click <b>Disconnect account</b> in the app. It revokes Inbox Triage's access to your Google account and
+      permanently deletes everything stored for that account. You can also revoke access at any time at
+      <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, or email
+      {{SUPPORT_EMAIL}}. Labels already added stay in Gmail; you can delete them there.</p>
+
+    <h2>Changes</h2>
+    <p>We'll update this page if data practices change. Last updated: 2026-09-24.</p>
+  </main>
+</body>
+</html>

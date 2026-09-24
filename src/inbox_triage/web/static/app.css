@@ -86,3 +86,7 @@ th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: u
 .view, .card { min-width: 0; }
 code { background: var(--chip); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
 .hidden { display: none !important; }
+.brand { color: inherit; text-decoration: none; }
+.prose { max-width: 760px; line-height: 1.6; }
+.prose h1 { font-size: 28px; } .prose h2 { font-size: 18px; margin-top: 28px; }
+.prose li { margin: 6px 0; }

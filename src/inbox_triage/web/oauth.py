@@ -17,7 +17,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from ..gmail.client import SCOPE, write_private
+from ..gmail import oauth as google_oauth
+from ..gmail.client import SCOPE, write_private  # noqa: F401
 
 BUNDLED = Path(__file__).parent / "oauth_client.json"
 GOOGLE = {"auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token"}
@@ -58,31 +59,16 @@ def save_client_json(text: str, config_dir: Path) -> None:
     write_private(config_dir.expanduser() / "client_secret.json", json.dumps(config))
 
 
-def _flow(client: dict, redirect_uri: str, verifier: str | None = None):
-    from google_auth_oauthlib.flow import Flow
-    return Flow.from_client_config(client, scopes=[SCOPE], redirect_uri=redirect_uri,
-                                   code_verifier=verifier, autogenerate_code_verifier=verifier is None)
-
-
 def authorization_url(client: dict, redirect_uri: str, state: str, login_hint: str | None) -> tuple[str, str]:
-    flow = _flow(client, redirect_uri)
-    extra = {"login_hint": login_hint} if login_hint else {}
-    # prompt=consent guarantees a refresh token so scheduled runs keep working.
-    url, _ = flow.authorization_url(state=state, access_type="offline", prompt="consent",
-                                    **extra)
-    return url, flow.code_verifier
+    return google_oauth.authorization_url(client, redirect_uri, state, login_hint)
 
 
 def exchange(client: dict, redirect_uri: str, code: str, verifier: str):
-    flow = _flow(client, redirect_uri, verifier)
-    flow.fetch_token(code=code)
-    return flow.credentials
+    return google_oauth.exchange(client, redirect_uri, code, verifier)
 
 
 def profile_email(credentials) -> str:
-    from googleapiclient.discovery import build
-    profile = build("gmail", "v1", credentials=credentials, cache_discovery=False).users().getProfile(userId="me").execute()
-    return str(profile["emailAddress"])
+    return google_oauth.profile_email(credentials)
 
 
 def revoke(token_path: Path) -> None:

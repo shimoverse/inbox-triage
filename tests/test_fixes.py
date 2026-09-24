@@ -3,11 +3,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from googleapiclient.errors import HttpError
-from httplib2 import Response
 
 from inbox_triage import context, runner
-from inbox_triage.gmail.client import GmailClient, HistoryExpired
+from inbox_triage.gmail.client import GmailClient, GmailError, HistoryExpired
 from inbox_triage.models import ContextPack, Destination, JevSignals, MailEvidence
 from inbox_triage.policy import decide
 from inbox_triage.providers import ProviderError, make_provider
@@ -18,7 +16,7 @@ NOW = 2_000_000_000
 
 
 def http_error(status):
-    return HttpError(Response({"status": str(status)}), b"{}")
+    return GmailError(status)
 
 
 def msg(labels=(), subject="", sender="Shop <orders@shop.example>", auth="dmarc=pass", thread="t1", to=""):
@@ -84,10 +82,9 @@ def test_truncated_history_advances_to_last_processed_record(tmp_path):
 
 def test_history_404_raises_history_expired():
     client = GmailClient.__new__(GmailClient)
-    def fail(**kw):
+    def fail(*a, **kw):
         raise http_error(404)
-    client.service = SimpleNamespace(users=lambda: SimpleNamespace(
-        history=lambda: SimpleNamespace(list=lambda **kw: SimpleNamespace(execute=fail))))
+    client._request = fail
     with pytest.raises(HistoryExpired):
         list(client.iter_history("1", max_pages=1, page_size=10))
 
@@ -112,20 +109,15 @@ def test_partial_journal_line_is_ignored_and_compaction_drops_old(tmp_path):
 class FakeMessages:
     def __init__(self):
         self.labels = {"INBOX"}
-    def get(self, **kw):
-        return SimpleNamespace(execute=lambda **k: {"labelIds": sorted(self.labels)})
-    def modify(self, **kw):
-        def execute(**k):
-            self.labels.update(kw["body"]["addLabelIds"])
-            self.labels.difference_update(kw["body"]["removeLabelIds"])
-        return SimpleNamespace(execute=execute)
 
 
 def live_setup(monkeypatch, ids, provider, fetch=None):
     messages = FakeMessages()
-    service = SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages))
     class Client:
-        def __init__(self, token, **kw): self.service = service
+        def __init__(self, token, **kw): pass
+        def message_labels(self, mid): return set(messages.labels)
+        def modify_labels(self, mid, add, remove):
+            messages.labels.update(add); messages.labels.difference_update(remove)
         def profile(self): return {"emailAddress": "a@example.org", "historyId": "8"}
         def _get(self, mid, *, full):
             if fetch: return fetch(mid)

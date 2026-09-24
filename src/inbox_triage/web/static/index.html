@@ -12,9 +12,17 @@
     <div class="brand"><span class="logo" aria-hidden="true"></span>Inbox Triage</div>
     <nav id="accounts" class="accounts" aria-label="Accounts"></nav>
   </header>
-  <main id="view" class="view" aria-live="polite"></main>
+  <main id="view" class="view" aria-live="polite">
+    <!-- Static description (for people and Google's review) until the app loads. -->
+    <div class="hero">
+      <h1>Sort your inbox, safely.</h1>
+      <p class="muted">Inbox Triage adds helpful Gmail labels (Needs You, Updates, For You, Later) using Jev by TypeSafe,
+        on a schedule you choose. It never sends, deletes, archives, or marks anything read.</p>
+    </div>
+  </main>
   <div id="toast" class="toast" role="status" hidden></div>
-  <footer class="foot">Label-only: Inbox Triage never sends, deletes, archives, or marks mail read.</footer>
+  <footer class="foot">Label-only: Inbox Triage never sends, deletes, archives, or marks mail read. ·
+    <a href="/privacy">Privacy policy</a> · <a href="https://github.com/shimoverse/inbox-triage">Open source</a></footer>
   <script src="/static/app.js"></script>
 </body>
 </html>

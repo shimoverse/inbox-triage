@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- **Lighter: no runtime dependencies.** The app now talks to the Gmail REST API and Google OAuth (PKCE) using Python's standard library, replacing Google's client libraries (~110 MB installed, about 40 MB of RAM once loaded).
+  - Memory: about 23 MB peak; startup: about 60 ms.
+  - Existing token files keep working.
+  - Workspace service accounts need `inbox-triage[workspace]`.
+- **Disconnect now deletes everything stored for the account.** It revokes Google access and removes the Jev key, rules, settings, history, context and journal, then signs that account out of the session.
+- **Built-in home page and privacy policy** (`/privacy`, including Google's Limited Use disclosure) for the OAuth consent screen. The contact comes from `INBOX_TRIAGE_SUPPORT_EMAIL`.
+
 ## 0.3.0
 
 - **Web app** (`inbox-triage-web`):

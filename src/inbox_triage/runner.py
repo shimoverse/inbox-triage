@@ -12,11 +12,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-
 from . import preferences
 from .context import bootstrap_context, build_context, sync_incremental
-from .gmail.client import GmailClient
+from .gmail.client import GmailClient, GmailError
 from .gmail.extract import extract_gmail_message
 from .policy import decide
 from .providers import ProviderError, make_provider
@@ -125,15 +123,13 @@ def account_lock(path: Path):
 
 
 def ensure_labels(client: GmailClient) -> dict[str, str]:
-    labels = client.service.users().labels()
     def current() -> dict[str, str]:
         # Gmail label names are case-insensitive; match an existing "triage/later" too.
-        return {x["name"].casefold(): x["id"] for x in labels.list(userId="me").execute(num_retries=5).get("labels", ())}
+        return {x["name"].casefold(): x["id"] for x in client.labels()}
     before = current()
     for name in LABELS:
         if name.casefold() not in before:
-            labels.create(userId="me", body={"name": name,
-                "labelListVisibility": "labelShow", "messageListVisibility": "show"}).execute(num_retries=5)
+            client.create_label(name)
     after = current()
     if not all(name.casefold() in after for name in LABELS):
         raise RuntimeError("Gmail label creation readback failed")
@@ -141,14 +137,13 @@ def ensure_labels(client: GmailClient) -> dict[str, str]:
 
 
 def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[str, str]) -> bool:
-    service = client.service.users().messages()
-    old = set(service.get(userId="me", id=mid, format="minimal").execute(num_retries=5).get("labelIds", ()))
+    old = client.message_labels(mid)
     owned = set(labels.values())
     target = {labels[name] for name in desired}
     add, remove = sorted(target - old), sorted((old & owned) - target)
     if add or remove:
-        service.modify(userId="me", id=mid, body={"addLabelIds": add, "removeLabelIds": remove}).execute(num_retries=5)
-    actual = set(service.get(userId="me", id=mid, format="minimal").execute(num_retries=5).get("labelIds", ()))
+        client.modify_labels(mid, add, remove)
+    actual = client.message_labels(mid)
     if actual & owned != target or (old - owned) - actual:
         raise RuntimeError("Gmail label readback mismatch")
     return bool(add or remove)
@@ -240,8 +235,8 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
             if not previous or previous["status"] != "classified":
                 try:
                     raw = client._get(mid, full=True)
-                except HttpError as exc:
-                    if exc.resp.status != 404:
+                except GmailError as exc:
+                    if exc.status != 404:
                         raise
                     outcomes["deleted"] += 1  # deleted since it was listed
                     continue
