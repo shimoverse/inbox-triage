@@ -84,7 +84,22 @@ async function refresh() {
   render();
 }
 
+function betaBanner() {
+  const b = STATE && STATE.beta;
+  const slot = document.getElementById("beta");
+  if (!slot) return;
+  if (!b || !b.enabled) return fill(slot);
+  const until = b.ends ? new Date(b.ends + "T00:00:00").toLocaleDateString(undefined, { dateStyle: "long" }) : null;
+  const parts = [b.ended ? "The free beta has ended"
+    : b.max_accounts ? `Free for the first ${b.max_accounts} users` : "Free beta"];
+  if (until && !b.ended) parts.push(`until ${until}`);
+  parts.push("bring your own Jev key");
+  fill(slot, el("span", {}, parts.join(" · ") + " · "),
+    el("a", { href: "https://github.com/shimoverse/inbox-triage", target: "_blank", rel: "noopener" }, "open source, self-host anytime"));
+}
+
 function renderAccounts() {
+  betaBanner();
   const nav = document.getElementById("accounts");
   fill(nav, 
     ...STATE.accounts.map((a) => el("button", { class: "acct" + (a.email === current ? " active" : ""),

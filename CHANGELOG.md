@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- **Free-beta controls for hosted servers.**
+  - `INBOX_TRIAGE_MAX_ACCOUNTS` caps new sign-ups. Returning users always get in, and a turned-away user's Google grant is revoked.
+  - `INBOX_TRIAGE_BETA_ENDS` sets the date shown in the banner "Free for the first N users · until …". No counts are shown.
+
 ## 0.4.0
 
 - **Lighter: no runtime dependencies.** The app now talks to the Gmail REST API and Google OAuth (PKCE) using Python's standard library, replacing Google's client libraries (~110 MB installed, about 40 MB of RAM once loaded).

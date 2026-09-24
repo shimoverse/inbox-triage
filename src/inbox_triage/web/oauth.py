@@ -71,12 +71,20 @@ def profile_email(credentials) -> str:
     return google_oauth.profile_email(credentials)
 
 
-def revoke(token_path: Path) -> None:
-    """Best effort: tell Google to drop the grant when an account is disconnected."""
+def revoke_token(token: str) -> None:
+    """Best effort: tell Google to drop a grant."""
     try:
-        token = json.loads(token_path.read_text()).get("refresh_token") or json.loads(token_path.read_text()).get("token")
         if token:
             data = urllib.parse.urlencode({"token": token}).encode()
             urllib.request.urlopen(urllib.request.Request("https://oauth2.googleapis.com/revoke", data=data), timeout=10)
     except Exception:
         pass
+
+
+def revoke(token_path: Path) -> None:
+    """Best effort: drop the grant stored in a token file (on disconnect)."""
+    try:
+        info = json.loads(token_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    revoke_token(info.get("refresh_token") or info.get("token") or "")

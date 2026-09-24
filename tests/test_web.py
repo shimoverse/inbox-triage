@@ -340,3 +340,40 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     assert b"<script" not in body
     index = call(app, "GET", "/")[2].decode()
     assert 'href="/privacy"' in index and "never sends, deletes" in index
+
+
+def _sign_in_via_callback(app, monkeypatch, email):
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
+    _, _, data = call(app, "POST", "/api/login", {"email": email})
+    state = data["url"].split("state=")[1].split("&")[0]
+    creds = SimpleNamespace(granted_scopes=[oauth.SCOPE], refresh_token="rt-" + email, token="at",
+                            to_json=lambda: '{"refresh_token":"r"}')
+    monkeypatch.setattr(oauth, "exchange", lambda *a: creds)
+    monkeypatch.setattr(oauth, "profile_email", lambda c: email)
+    return call(app, "GET", f"/oauth/callback?state={state}&code=abc")
+
+
+def test_free_beta_caps_new_accounts_but_not_returning_ones(app, monkeypatch):
+    revoked = []
+    monkeypatch.setattr(oauth, "revoke_token", lambda t: revoked.append(t))
+    monkeypatch.setenv("INBOX_TRIAGE_MAX_ACCOUNTS", "2")
+    monkeypatch.setenv("INBOX_TRIAGE_BETA_ENDS", "2026-10-31")
+    beta = call(app, "GET", "/api/state")[2]["beta"]
+    # No counts are exposed: just the limit and the end date.
+    assert beta == {"enabled": True, "max_accounts": 2, "ends": "2026-10-31", "ended": beta["ended"]}
+    status, headers, _ = _sign_in_via_callback(app, monkeypatch, "second@example.org")  # fixture has 1 account
+    assert headers["Location"].startswith("/#account=") and app.beta_full()
+    # A third person is turned away, and the fresh Google grant is revoked.
+    status, headers, _ = _sign_in_via_callback(app, monkeypatch, "third@example.org")
+    assert "beta%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org"]
+    assert not (app.config_dir / "tokens" / "third@example.org.json").exists()
+    # Existing users can always sign back in.
+    status, headers, _ = _sign_in_via_callback(app, monkeypatch, EMAIL)
+    assert headers["Location"].startswith("/#account=")
+
+
+def test_no_beta_limits_by_default(app, monkeypatch):
+    monkeypatch.delenv("INBOX_TRIAGE_MAX_ACCOUNTS", raising=False)
+    monkeypatch.delenv("INBOX_TRIAGE_BETA_ENDS", raising=False)
+    assert call(app, "GET", "/api/state")[2]["beta"]["enabled"] is False
