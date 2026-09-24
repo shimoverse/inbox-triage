@@ -52,10 +52,9 @@ PUBLIC_URL=https://$DOMAIN
 # Shown on https://$DOMAIN/privacy (the privacy policy URL for Google's consent screen):
 INBOX_TRIAGE_SUPPORT_EMAIL=
 INBOX_TRIAGE_OPERATOR=
-# Free beta: at most this many accounts (Google also caps unverified apps at 100 users), and an
-# informational end date shown in the banner. Leave empty for no limits.
+# Free beta: at most this many accounts (Google also caps unverified apps at 100 users).
+# Leave empty for no limit. Optional: INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD shows an end date in the banner.
 INBOX_TRIAGE_MAX_ACCOUNTS=100
-INBOX_TRIAGE_BETA_ENDS=2026-10-31
 # Google OAuth client ("Web application", redirect https://$DOMAIN/oauth/callback). See docs/google-cloud-setup.md
 INBOX_TRIAGE_OAUTH_CLIENT_ID=
 INBOX_TRIAGE_OAUTH_CLIENT_SECRET=
@@ -64,6 +63,9 @@ OPENROUTER_API_KEY=
 # Do NOT set TYPESAFE_API_KEY here: every user connects their own Jev key.
 ENV
 fi
+
+# Earlier templates defaulted to a fixed beta end date; drop exactly that default (a date set on purpose stays).
+[ -f "$ENV_FILE" ] && sed -i '/^INBOX_TRIAGE_BETA_ENDS=2026-10-31$/d' "$ENV_FILE"
 
 echo "==> systemd"
 install -m 0644 "$APP_DIR/deploy/inbox-triage.service" /etc/systemd/system/inbox-triage.service
