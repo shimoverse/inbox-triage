@@ -11,33 +11,30 @@ from inbox_triage.providers.lean_jev import LeanJevProvider
 
 
 class FakeMessages:
+    """Stands in for the Gmail client's label methods."""
     def __init__(self):
         self.labels = {"INBOX", "STARRED"}
         self.calls = []
-    def get(self, **kwargs):
-        return SimpleNamespace(execute=lambda **kw: {"labelIds": sorted(self.labels)})
-    def modify(self, **kwargs):
-        self.calls.append(kwargs["body"])
-        def execute(**_):
-            self.labels.update(kwargs["body"]["addLabelIds"])
-            self.labels.difference_update(kwargs["body"]["removeLabelIds"])
-        return SimpleNamespace(execute=execute)
+    def message_labels(self, mid):
+        return set(self.labels)
+    def modify_labels(self, mid, add, remove):
+        self.calls.append({"addLabelIds": add, "removeLabelIds": remove})
+        self.labels.update(add)
+        self.labels.difference_update(remove)
 
 
 def test_label_only_preserves_native_labels_and_reads_back():
     messages = FakeMessages()
-    client = SimpleNamespace(service=SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages)))
-    assert runner.apply_labels(client, "sample", {"Triage/For You"}, {"Triage/For You": "custom1"})
+    assert runner.apply_labels(messages, "sample", {"Triage/For You"}, {"Triage/For You": "custom1"})
     assert messages.labels == {"INBOX", "STARRED", "custom1"}
     assert messages.calls == [{"addLabelIds": ["custom1"], "removeLabelIds": []}]
 
 
 def test_readback_mismatch_stops():
     messages = FakeMessages()
-    messages.modify = lambda **kwargs: SimpleNamespace(execute=lambda **kw: None)
-    client = SimpleNamespace(service=SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages)))
+    messages.modify_labels = lambda mid, add, remove: None  # the write silently didn't stick
     with pytest.raises(RuntimeError, match="readback mismatch"):
-        runner.apply_labels(client, "sample", {"Triage/For You"}, {"Triage/For You": "custom1"})
+        runner.apply_labels(messages, "sample", {"Triage/For You"}, {"Triage/For You": "custom1"})
 
 
 def test_scoped_state_and_complete_scan():
@@ -77,9 +74,10 @@ def test_lean_payload_excludes_ids_and_family_context(monkeypatch):
 
 def test_live_runner_verifies_account_and_resumes_without_new_model_call(tmp_path, monkeypatch):
     messages = FakeMessages()
-    service = SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: messages))
     class Client:
-        def __init__(self, token, **kw): self.service = service
+        def __init__(self, token, **kw): pass
+        def message_labels(self, mid): return messages.message_labels(mid)
+        def modify_labels(self, mid, add, remove): messages.modify_labels(mid, add, remove)
         def profile(self): return {"emailAddress": "a@example.org", "historyId": "8"}
         def _get(self, mid, *, full): return {"id": mid, "payload": {"mimeType": "text/plain", "headers": []}}
         def attachment_data(self, mid, aid): return ""

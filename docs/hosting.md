@@ -37,7 +37,9 @@ That's fine for yourself, family, a team, or a beta. To remove the cap for the p
 
 ## 4. Run a hosted server
 
-You need one small Linux VM (Debian or Ubuntu; 1 vCPU and 1–2 GB RAM is plenty), a DNS name pointing at it, and ports 80 and 443 open. **Docker isn't needed.**
+You need one small Linux VM, a DNS name pointing at it, and ports 80 and 443 open. **Docker isn't needed.**
+
+The app has no third-party dependencies and uses about 25 MB of RAM; Caddy adds about 30 MB. A Google Cloud **e2-micro** (1 GB RAM) is enough. One e2-micro in `us-central1`, `us-west1` or `us-east1` falls under Google Cloud's free tier; expect a few dollars a month at most for the external IP address and snapshots.
 
 ```bash
 git clone https://github.com/shimoverse/inbox-triage.git && cd inbox-triage
@@ -59,7 +61,9 @@ In hosted mode:
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
 - **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** any server-wide `TYPESAFE_API_KEY`, so the operator can never end up paying for other users' Jev usage;
-- the OAuth client and the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default) come from `/etc/inbox-triage/env`;
+- the OAuth client, the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default), and the contact shown on the built-in privacy policy (`INBOX_TRIAGE_SUPPORT_EMAIL`, `INBOX_TRIAGE_OPERATOR`) come from `/etc/inbox-triage/env`;
+- the app serves its own home page (`/`) and privacy policy (`/privacy`), so the consent screen can use `https://<domain>/` and `https://<domain>/privacy`;
+- **Disconnect account** revokes Google access and deletes all of that user's stored data;
 - the built-in scheduler runs every account's schedule, so run exactly one instance;
 - `/var/lib/inbox-triage` holds users' Google tokens, Jev keys, and rules. Use an encrypted disk and encrypted snapshots, and restrict SSH.
 

@@ -19,7 +19,7 @@ End users never do this. Path 1 (the hosted app) needs it done once by the opera
 2. **Enable the Gmail API.** APIs & Services → Library → *Gmail API* → Enable.
 3. **Branding.** Under Google Auth Platform → Branding, set:
    - the app name (*Inbox Triage*), support email and logo;
-   - the home page URL and privacy policy URL (required for Path 1);
+   - the home page URL `https://<your-domain>/` and privacy policy URL `https://<your-domain>/privacy`, both served by the app (required for Path 1);
    - an authorized domain (your app's domain, verified in Search Console).
 4. **Audience.** Choose *External*, or *Internal* if every user is in your own Google Workspace. Then click **Publish app**. Apps left in *Testing* only allow listed test users and expire refresh tokens after 7 days.
 5. **Data access.** Add the scope `https://www.googleapis.com/auth/gmail.modify`. It's a *restricted* scope.

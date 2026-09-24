@@ -59,7 +59,7 @@ Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned 
 
 ### Path 2: clone and run it yourself
 
-Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/). **No other dependencies**: Gmail, Google sign-in, Jev and the web app all use Python's standard library, so the app loads in about 25 MB of memory.
 
 ```bash
 git clone https://github.com/shimoverse/inbox-triage.git
@@ -99,7 +99,7 @@ Jev decides; it doesn't write. Reading your typed notes and proposing rules is a
 - **Runs work in batches.** Scheduled runs continue from the last checkpoint. Batches are 100 messages, with at most 2,000 per run. Runs overlap by two days to catch delayed mail and skip anything already verified.
 - **Context comes from your mailbox.** People you've emailed, threads you joined, and authenticated receipts count. Only account-scoped hashes of these facts are stored, updated through the Gmail History API, and rebuilt automatically if that history expires.
 - **Jev failures are contained.** Jev calls retry on 429 and 529 ("overloaded"). A message that repeatedly gets an unusable answer is left unchanged after three tries. If Jev fails repeatedly in a row, the run stops without advancing.
-- **Google Workspace admins** can triage many mailboxes with a service account and domain-wide delegation: `inbox-triage --service-account key.json --account a@corp.example --account b@corp.example`.
+- **Google Workspace admins** can triage many mailboxes with a service account and domain-wide delegation: `uv sync --extra workspace`, then `inbox-triage --service-account key.json --account a@corp.example --account b@corp.example`.
 
 ## Privacy and limits
 
@@ -111,7 +111,7 @@ Jev decides; it doesn't write. Reading your typed notes and proposing rules is a
   - a journal of Gmail message IDs and label decisions;
   - hashed relationship evidence.
 
-  Raw messages are never saved; the dashboard fetches subjects live. Google tokens, local keys and the web session secret live in `~/.config/inbox-triage/` (0600).
+  Raw messages are never saved; the dashboard fetches subjects live. **Disconnect account** revokes Google access and deletes all of the above. Google tokens, local keys and the web session secret live in `~/.config/inbox-triage/` (0600).
 - **Web app security:**
   - listens on 127.0.0.1 unless hosted, and hosting requires HTTPS;
   - signed HttpOnly sessions, and each Google account sees only its own data;
@@ -132,7 +132,7 @@ uv run pytest -q
 | `providers/` | Jev: questions, answer parsing (noul/choice), retries, key check |
 | `assistant.py`, `onboarding.py` | Optional notes → rules via OpenRouter |
 | `policy.py`, `preferences.py` | Jev answers + your rules → labels |
-| `gmail/` | Gmail access (batching, retries, History API) and message extraction |
+| `gmail/` | Standard-library Gmail REST client (parallel reads, retries, History API), OAuth with PKCE, message extraction |
 | `context.py`, `store.py` | Hashed relationship and purchase facts |
 | `runner.py`, `accounts.py`, `config.py` | Triage batches, history, schedules, keys; the CLI |
 | `web/` | Web app (stdlib WSGI): Google sign-in, onboarding, dashboard, scheduler |

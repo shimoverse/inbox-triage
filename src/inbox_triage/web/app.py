@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -129,7 +130,9 @@ class App:
             raise HTTPError(403, "Missing CSRF header")
         if path == "/" or path == "/index.html":
             return self.static("index.html")
-        if path.startswith("/static/"):
+        if path in {"/privacy", "/privacy.html"}:
+            return self.privacy()
+        if path.startswith("/static/") and not path.endswith("privacy.html"):
             return self.static(path.removeprefix("/static/"))
         if path == "/oauth/callback":
             return self.oauth_callback(environ)
@@ -155,7 +158,12 @@ class App:
             if account not in emails:
                 raise HTTPError(403, "Sign in with this Google account first")
             action = parts[2] if len(parts) > 2 else ""
-            return self.json(self.account_api(method, account, action, body, query))
+            result = self.account_api(method, account, action, body, query)
+            if method == "DELETE" and not action:
+                # Also sign this account out of the browser session.
+                remaining = [e for e in emails if e != account]
+                return self.json(result, [("Set-Cookie", self.session_cookie(remaining))])
+            return self.json(result)
         raise HTTPError(404, "Not found")
 
     @staticmethod
@@ -186,6 +194,14 @@ class App:
         """This computer's Jev key, used only when self-hosting. Hosted servers ignore it:
         every user must connect their own Jev, so the operator never pays for others."""
         return "" if self.hosted else config.api_key_for("jev", self.config_dir)
+
+    def privacy(self):
+        """Privacy policy for Google's consent screen; the operator's contact comes from the environment."""
+        import html as _html
+        email = _html.escape(os.environ.get("INBOX_TRIAGE_SUPPORT_EMAIL", "the operator"))
+        operator = _html.escape(os.environ.get("INBOX_TRIAGE_OPERATOR", "the operator of this Inbox Triage server"))
+        status, headers, body = self.static("privacy.html")
+        return status, headers, body.decode().replace("{{SUPPORT_EMAIL}}", email).replace("{{OPERATOR}}", operator).encode()
 
     # ------------------------------------------------------------------ state
     def state(self, emails: list[str]) -> dict:
@@ -318,12 +334,24 @@ class App:
         if (method, action) == ("GET", "history"):
             return {"runs": acct.runs(50), "decisions": self.decorate(email, acct.decisions(30))}
         if (method, action) == ("DELETE", ""):
-            token = default_token(email, self.config_dir)
-            if token.exists():
-                oauth.revoke(token)
-                token.unlink()
+            self.forget_account(email)
             return {"ok": True}
         raise HTTPError(404, "Not found")
+
+    def forget_account(self, email: str) -> None:
+        """Disconnect = delete: revoke Google's grant and remove everything stored for
+        this account (token, Jev key, rules, settings, history, context, journal)."""
+        with self.lock:
+            job = self.jobs.get(email)
+            if job and job.status == "running":
+                raise HTTPError(409, "Wait for the current run to finish, then disconnect")
+            self.jobs.pop(email, None)
+        token = default_token(email, self.config_dir)
+        if token.exists():
+            oauth.revoke(token)
+            token.unlink()
+        shutil.rmtree(Account(self.state_dir, email).dir, ignore_errors=True)
+        _log(f"account deleted account={_tag(email)}")
 
     def client(self, email: str) -> GmailClient:
         token = default_token(email, self.config_dir)
@@ -460,9 +488,6 @@ def serve(argv=None) -> int:
         parser.error("--public-url must be https://")
     base = args.public_url or f"http://127.0.0.1:{args.port}"
     config.load_dotenv(Path(".env"), args.config_dir / ".env")
-    if not args.public_url:
-        # oauthlib insists on HTTPS except for loopback redirects like this one.
-        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
     app = App(config_dir=args.config_dir, state_dir=args.state_dir, base_url=base, hosted=bool(args.public_url))
     if app.hosted and config.api_key_for("jev", args.config_dir):
         print("Note: hosted mode ignores the server's TYPESAFE_API_KEY; every user connects their own Jev key.")

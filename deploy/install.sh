@@ -49,6 +49,9 @@ if [ ! -f "$ENV_FILE" ]; then
   install -o root -g triage -m 0640 /dev/null "$ENV_FILE"
   cat > "$ENV_FILE" <<ENV
 PUBLIC_URL=https://$DOMAIN
+# Shown on https://$DOMAIN/privacy (the privacy policy URL for Google's consent screen):
+INBOX_TRIAGE_SUPPORT_EMAIL=
+INBOX_TRIAGE_OPERATOR=
 # Google OAuth client ("Web application", redirect https://$DOMAIN/oauth/callback). See docs/google-cloud-setup.md
 INBOX_TRIAGE_OAUTH_CLIENT_ID=
 INBOX_TRIAGE_OAUTH_CLIENT_SECRET=

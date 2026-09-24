@@ -313,3 +313,30 @@ def test_hosted_server_never_uses_its_own_jev_key_for_users(app, monkeypatch):
 def test_healthz_is_open_and_leaks_nothing(app):
     status, _, data = call(app, "GET", "/healthz", headers={"HTTP_HOST": "10.0.0.5:8765"})
     assert status == 200 and data["ok"] is True and set(data) == {"ok", "version"}
+
+
+def test_disconnect_deletes_all_account_data(app, monkeypatch):
+    revoked = []
+    monkeypatch.setattr(oauth, "revoke", lambda path: revoked.append(path))
+    cookie = signed_in(app, (EMAIL, "b@example.org"))
+    acct = Account(app.state_dir, EMAIL)
+    acct.save_jev_key("k")
+    acct.update_settings({"schedule": {"frequency": "daily"}})
+    acct.record_run({"started": 1, "status": "ok"})
+    (acct.dir / "events.jsonl").write_text('{"id":"m","status":"verified"}\n')
+    status, headers, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)
+    assert status == 200 and revoked
+    assert not (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
+    assert not acct.dir.exists()
+    assert app.session_emails({"HTTP_COOKIE": headers["Set-Cookie"].split(";")[0]}) == ["b@example.org"]
+
+
+def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
+    monkeypatch.setenv("INBOX_TRIAGE_SUPPORT_EMAIL", "help@example.org")
+    status, headers, body = call(app, "GET", "/privacy")
+    text = body.decode()
+    assert status == 200 and "help@example.org" in text and "{{" not in text
+    assert "Limited Use" in text and "gmail.modify" in text and "Disconnect account" in text
+    assert b"<script" not in body
+    index = call(app, "GET", "/")[2].decode()
+    assert 'href="/privacy"' in index and "never sends, deletes" in index
