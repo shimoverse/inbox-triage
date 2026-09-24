@@ -75,9 +75,12 @@ def _decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds) -> Ro
         return RoutingDecision(Destination.FOR_YOU, "The message is specifically relevant to an active relationship or priority.", s.personal_relevance, topics)
     # Mass mail tailored from your activity (listings, "picked for you" offers) can wait,
     # unless it's a security notice, a real account/order event, or from someone you know.
+    # Only when nothing protects it: no account/order/security/medical evidence, no Gmail
+    # Important/Updates signal, no service update, no relationship. Protected mail that merely
+    # looks tailored stays unchanged (never For You, never buried).
     tailored = max(s.personal_relevance, s.personalized_offer)
-    if (mass_mail and tailored >= t.relevant and not relationship and not c.recent_purchase
-            and "security" not in e.protected_kinds and not personal_event_subject(e)):
+    if (mass_mail and tailored >= t.relevant and not protected and s.service_update < t.update
+            and not personal_event_subject(e)):
         return RoutingDecision(Destination.LATER, "Mass mail tailored to your activity; it can wait.", tailored, topics, True)
     authenticated = e.auth.get("dmarc") == "pass" or (e.auth.get("spf") == "pass" and e.auth.get("dkim") == "pass")
     if not protected and (e.bulk or e.list_unsubscribe) and s.deceptive >= t.spam and s.unsolicited_bulk >= .90 and not authenticated:

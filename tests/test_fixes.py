@@ -312,3 +312,18 @@ def test_activity_based_marketing_is_later_not_for_you():
     assert decide(order, ContextPack(), offer).destination != Destination.LATER
     # A bulk offer alone (no relevance) is not For You either.
     assert decide(listing, ContextPack(), JevSignals(personalized_offer=.95)).destination != Destination.FOR_YOU
+
+
+
+def test_tailored_rule_never_buries_protected_mail():
+    """Codex review: account/service updates and Gmail Important/Updates mail must not go to Later."""
+    offer = JevSignals(personalized_offer=.95, personal_relevance=.9)
+    renewal = MailEvidence("m", subject="Automatic renewal confirmation", bulk=True, list_unsubscribe=True,
+                           protected_kinds=frozenset({"account"}))
+    d = decide(renewal, ContextPack(), JevSignals(personal_relevance=.9, service_update=.99))
+    assert d.destination not in {Destination.LATER, Destination.FOR_YOU}
+    for labels in ({"IMPORTANT"}, {"CATEGORY_UPDATES"}):
+        mail = MailEvidence("m", subject="Picked for you", bulk=True, list_unsubscribe=True, labels=frozenset(labels))
+        assert decide(mail, ContextPack(), offer).destination not in {Destination.LATER, Destination.FOR_YOU}
+    unprotected = MailEvidence("m", subject="New listings near you", bulk=True, list_unsubscribe=True)
+    assert decide(unprotected, ContextPack(), JevSignals(personalized_offer=.95, service_update=.9)).destination != Destination.LATER
