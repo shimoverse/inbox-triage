@@ -190,6 +190,24 @@ class App:
                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://accounts.google.com")
         return 200, [("Content-Type", ctype), ("Content-Security-Policy", csp)], path.read_bytes()
 
+    def beta(self) -> dict:
+        """Optional free-beta limits for a hosted server, all from the environment:
+        INBOX_TRIAGE_MAX_ACCOUNTS (e.g. 100) and INBOX_TRIAGE_BETA_ENDS (YYYY-MM-DD).
+        The end date is informational; the operator decides what happens after it."""
+        try:
+            max_accounts = int(os.environ.get("INBOX_TRIAGE_MAX_ACCOUNTS") or 0)
+        except ValueError:
+            max_accounts = 0
+        ends = os.environ.get("INBOX_TRIAGE_BETA_ENDS", "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", ends):
+            ends = ""
+        return {"enabled": bool(max_accounts or ends), "max_accounts": max_accounts or None, "ends": ends or None,
+                "ended": bool(ends) and time.strftime("%Y-%m-%d") > ends}
+
+    def beta_full(self) -> bool:
+        limit = self.beta()["max_accounts"]
+        return bool(limit) and len(discover_accounts(self.config_dir)) >= limit
+
     def machine_jev_key(self) -> str:
         """This computer's Jev key, used only when self-hosting. Hosted servers ignore it:
         every user must connect their own Jev, so the operator never pays for others."""
@@ -222,7 +240,7 @@ class App:
                 "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url()},
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
-                "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
+                "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
 
     # ------------------------------------------------------------------ OAuth
     def login(self, body: dict) -> dict:
@@ -261,6 +279,12 @@ class App:
         if SCOPE not in granted:
             return self.redirect("/#error=" + quote("Please tick the Gmail permission so labels can be added"))
         email = oauth.profile_email(credentials).casefold()
+        if self.beta_full() and email not in discover_accounts(self.config_dir):
+            # Beta is full: don't keep access to a mailbox we won't serve.
+            oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
+            return self.redirect("/#error=" + quote(
+                "The free beta is full. Inbox Triage is open source, so you can run it yourself: "
+                "github.com/shimoverse/inbox-triage"))
         write_private(default_token(email, self.config_dir), credentials.to_json())
         emails = sorted(set(self.session_emails(environ)) | {email})
         return self.redirect(f"/#account={quote(email)}", [("Set-Cookie", self.session_cookie(emails))])

@@ -90,3 +90,5 @@ code { background: var(--chip); padding: 1px 5px; border-radius: 5px; font-size:
 .prose { max-width: 760px; line-height: 1.6; }
 .prose h1 { font-size: 28px; } .prose h2 { font-size: 18px; margin-top: 28px; }
 .prose li { margin: 6px 0; }
+.beta { text-align: center; font-size: 13.5px; padding: 8px 16px; background: var(--chip); color: var(--ink); }
+.beta:empty { display: none; }

@@ -46,6 +46,8 @@ Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned 
 
 ### Path 1: use the hosted app
 
+The hosted app is a **free beta for the first 100 users, until October 31, 2026**. You bring your own Jev key; the code is MIT-licensed, so you can always self-host instead.
+
 1. Open the app and enter your email, then click **Sign in with Google** and approve the permission to manage Gmail labels.
 2. **Connect Jev.** Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
 3. **Tell it what matters.**
