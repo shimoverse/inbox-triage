@@ -63,10 +63,12 @@ def api_key_for(role: str, config_dir: Path = CONFIG_DIR) -> str:
 
 
 def jev_settings(settings: dict | None = None, model_override: str | None = None,
-                 config_dir: Path = CONFIG_DIR, account_key: str = "") -> tuple[str | None, str]:
-    """(model, key) for Jev: the account's own key, else this machine's key.
-    Raises JevRequired when neither is configured."""
-    key = account_key or api_key_for("jev", config_dir)
+                 config_dir: Path = CONFIG_DIR, account_key: str = "",
+                 allow_machine_key: bool = True) -> tuple[str | None, str]:
+    """(model, key) for Jev: the account's own key, else, when self-hosting only,
+    this machine's key. A hosted server passes ``allow_machine_key=False`` so an
+    operator's key can never pay for other users. Raises JevRequired otherwise."""
+    key = account_key or (api_key_for("jev", config_dir) if allow_machine_key else "")
     if not key:
         raise JevRequired(f"Connect Jev first: add a TYPESAFE_API_KEY (get one at {signup_url()})")
     model = model_override or (settings or {}).get("model") or os.environ.get("INBOX_TRIAGE_JEV_MODEL") or None

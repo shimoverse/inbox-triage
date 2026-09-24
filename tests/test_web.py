@@ -287,3 +287,24 @@ def test_each_account_can_bring_its_own_jev_key(app, monkeypatch):
     # Hosted users can't set the server-wide key, only their own.
     app.hosted = True
     assert call(app, "PUT", "/api/keys", {"role": "jev", "key": "x"}, cookie)[0] == 403
+
+
+def test_hosted_server_never_uses_its_own_jev_key_for_users(app, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "operator-key")  # set on the server by mistake
+    app.hosted = True
+    cookie = signed_in(app)
+    state = call(app, "GET", "/api/state", cookie=cookie)[2]
+    assert state["jev"]["connected"] is False and state["accounts"][0]["jev_connected"] is False
+    status, _, data = call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 1}, cookie)
+    assert status == 409 and "Connect Jev" in data["error"]
+    Account(app.state_dir, EMAIL).update_settings({"schedule": {"frequency": "hourly"}}, now=1_000_000)
+    assert app.scheduler_tick(now=1_000_000 + 7200) == [] and app.fake_runs == []
+    # Once the user adds their own key, it (and only it) is used.
+    Account(app.state_dir, EMAIL).save_jev_key("users-own-key")
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 1}, cookie)[0] == 200
+    import time
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        time.sleep(.01)
+    assert app.fake_runs[-1][1]["runner_kwargs"]["api_key"] == "users-own-key"

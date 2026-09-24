@@ -179,6 +179,11 @@ class App:
                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://accounts.google.com")
         return 200, [("Content-Type", ctype), ("Content-Security-Policy", csp)], path.read_bytes()
 
+    def machine_jev_key(self) -> str:
+        """This computer's Jev key, used only when self-hosting. Hosted servers ignore it:
+        every user must connect their own Jev, so the operator never pays for others."""
+        return "" if self.hosted else config.api_key_for("jev", self.config_dir)
+
     # ------------------------------------------------------------------ state
     def state(self, emails: list[str]) -> dict:
         connected = set(discover_accounts(self.config_dir))
@@ -189,13 +194,13 @@ class App:
             runs = acct.runs(1)
             job = self.jobs.get(email)
             accounts.append({"email": email, "connected": email in connected, "settings": settings,
-                             "jev_connected": bool(acct.jev_key() or config.api_key_for("jev", self.config_dir)),
+                             "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
                              "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
                              "job": job.__dict__ if job else None,
                              "rules": len(acct.preferences().rules)})
         return {"accounts": accounts, "hosted": self.hosted,
                 "oauth_configured": oauth.client_config(self.config_dir) is not None,
-                "jev": {"connected": bool(config.api_key_for("jev", self.config_dir)), "signup_url": config.signup_url()},
+                "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url()},
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
                 "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
@@ -361,7 +366,8 @@ class App:
         else:
             days = None
         try:
-            config.jev_settings(None, None, self.config_dir, Account(self.state_dir, email).jev_key())
+            config.jev_settings(None, None, self.config_dir, Account(self.state_dir, email).jev_key(),
+                                allow_machine_key=not self.hosted)
         except config.JevRequired as exc:
             raise HTTPError(409, str(exc)) from None
         with self.lock:
@@ -376,7 +382,8 @@ class App:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
-            model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key())
+            model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key(),
+                                             allow_machine_key=not self.hosted)
             job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, runner_kwargs={
                 "token": default_token(job.account, self.config_dir), "model": model,
                 "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
@@ -442,6 +449,8 @@ def serve(argv=None) -> int:
         # oauthlib insists on HTTPS except for loopback redirects like this one.
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
     app = App(config_dir=args.config_dir, state_dir=args.state_dir, base_url=base, hosted=bool(args.public_url))
+    if app.hosted and config.api_key_for("jev", args.config_dir):
+        print("Note: hosted mode ignores the server's TYPESAFE_API_KEY; every user connects their own Jev key.")
 
     class Server(ThreadingMixIn, WSGIServer):
         daemon_threads = True

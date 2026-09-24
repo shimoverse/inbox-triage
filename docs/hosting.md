@@ -50,7 +50,7 @@ Put a TLS reverse proxy (Caddy, nginx, a cloud load balancer) in front of port 8
 
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
-- **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail, so the server never pays for users' Jev usage;
+- **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** any server-wide `TYPESAFE_API_KEY`, so the operator can never end up paying for other users' Jev usage;
 - the OAuth client and the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default) come from the operator's environment;
 - the built-in scheduler runs every account's schedule, so keep one instance running;
 - OAuth tokens, per-account state, and rules live under `/data`. Back it up **encrypted**: it grants access to users' mailboxes.

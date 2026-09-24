@@ -20,7 +20,7 @@ Jev by TypeSafe is a **System One model**. It doesn't write text; it makes fast,
 
 Fixed local rules turn those answers into at most one attention label, plus a Shopping topic label when that applies. TypeSafe quotes about 0.1 s and a small fraction of a cent per decision, and the dashboard shows the number of Jev decisions and their average latency for every run.
 
-**A Jev key is required.** Get one at [console.typesafe.ai](https://console.typesafe.ai/). Without it the app won't sort mail, and it links you there.
+**A Jev key is required, and each user brings their own.** Get one at [console.typesafe.ai](https://console.typesafe.ai/). Without it the app won't sort mail, and it links you there. On the hosted app a user's key is used only for their own mailbox, and the server never falls back to an operator key.
 
 ```mermaid
 flowchart LR
