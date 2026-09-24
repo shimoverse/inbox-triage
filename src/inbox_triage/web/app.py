@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import traceback
@@ -22,7 +23,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from .. import config, onboarding
+from .. import __version__, config, onboarding
 from ..accounts import FREQUENCIES, Account, run_account
 from ..gmail.client import SCOPE, GmailClient, write_private
 from ..preferences import Preferences
@@ -119,6 +120,8 @@ class App:
     def handle(self, environ):
         method = environ["REQUEST_METHOD"]
         path = environ.get("PATH_INFO", "/") or "/"
+        if path == "/healthz" and method == "GET":
+            return self.json({"ok": True, "version": __version__})  # for systemd/proxy checks; no data
         host = environ.get("HTTP_HOST", "")
         if host and host not in self.allowed_hosts:
             raise HTTPError(400, "Unexpected Host header")  # DNS-rebinding guard
@@ -388,8 +391,11 @@ class App:
                 "token": default_token(job.account, self.config_dir), "model": model,
                 "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "ok"
+            _log(f"run ok account={_tag(job.account)} trigger={trigger} processed={job.result.get('processed', 0)} "
+                 f"labeled={job.result.get('gmail_changes', 0)} jev_calls={job.result.get('jev_calls', 0)}")
         except Exception as exc:
             job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
+            _log(f"run error account={_tag(job.account)} trigger={trigger} type={type(exc).__name__}")
 
     def scheduler_tick(self, now: int | None = None) -> list[str]:
         started = []
@@ -401,6 +407,15 @@ class App:
             except HTTPError:
                 continue  # already running, or Jev isn't connected
         return started
+
+
+def _tag(email: str) -> str:
+    """Short opaque account tag for logs (no addresses in server logs)."""
+    return hashlib.sha256(email.encode()).hexdigest()[:10]
+
+
+def _log(message: str) -> None:
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}", file=sys.stderr, flush=True)
 
 
 def _int(value) -> int:
