@@ -30,7 +30,9 @@ def call(app, method, path, body=None, cookie="", headers=None):
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-only")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     runs = []
     def fake_run(account, state_root, **kw):
         runs.append((account, kw))
@@ -68,7 +70,8 @@ def test_state_and_login_without_oauth_client(app, monkeypatch):
     status, _, state = call(app, "GET", "/api/state", cookie=signed_in(app))
     assert status == 200 and state["oauth_configured"] is False
     assert state["accounts"][0]["email"] == EMAIL and state["accounts"][0]["connected"]
-    assert {p["id"] for p in state["providers"]} >= {"openrouter", "openai", "anthropic", "ollama"}
+    assert state["jev"] == {"connected": True, "signup_url": "https://console.typesafe.ai/"}
+    assert state["assistant"]["available"] is False and state["assistant"]["model"] == "deepseek/deepseek-v4.1-flash"
     assert call(app, "POST", "/api/login", {"email": EMAIL})[0] == 409
     assert call(app, "POST", "/api/oauth-client", {"json": "{}"})[0] == 400
     good = json.dumps({"installed": {"client_id": "cid", "client_secret": "s"}})
@@ -110,8 +113,8 @@ def test_callback_saves_token_and_signs_in(app, monkeypatch):
 def test_settings_preferences_and_interpret(app, monkeypatch):
     cookie = signed_in(app)
     status, _, s = call(app, "PUT", f"/api/accounts/{EMAIL}/settings",
-                        {"provider": "openrouter", "schedule": {"frequency": "weekly", "hour": 30, "weekday": 2}}, cookie)
-    assert status == 200 and s["schedule"]["hour"] == 23 and s["provider"] == "openrouter"
+                        {"model": "jev-latest", "schedule": {"frequency": "weekly", "hour": 30, "weekday": 2}}, cookie)
+    assert status == 200 and s["schedule"]["hour"] == 23 and s["model"] == "jev-latest" and "provider" not in s
     assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"frequency": "yearly"}}, cookie)[0] == 400
     prefs = {"rules": [{"kind": "domain", "value": "@School.example", "action": "important", "note": "kids"},
                        {"kind": "domain", "value": "nodot", "action": "important"},
@@ -124,18 +127,45 @@ def test_settings_preferences_and_interpret(app, monkeypatch):
             assert "untrusted" in system and "#2" in json.loads(user)["notes"]
             return {"summary": "Kids' school is important.", "rules": [
                 {"kind": "domain", "value": "school.example", "action": "important", "note": "school"}]}, {}
-    monkeypatch.setattr(webapp, "make_provider", lambda *a, **k: FakeLLM())
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
+    monkeypatch.setattr(webapp, "Assistant", lambda key: FakeLLM())
     status, _, proposed = call(app, "POST", f"/api/accounts/{EMAIL}/interpret",
                                {"notes": "#2 is my kids' school, important", "emails": [{"from": "x", "domain": "school.example", "subject": "Trip"}]}, cookie)
     assert status == 200 and proposed["rules"][0]["value"] == "school.example"
 
 
-def test_interpret_requires_json_capable_provider(app, monkeypatch):
+def test_interpret_needs_the_optional_assistant_key(app):
     cookie = signed_in(app)
-    call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"provider": "rules"}, cookie)
     status, _, data = call(app, "POST", f"/api/accounts/{EMAIL}/interpret", {"notes": "hi"}, cookie)
-    assert status == 422 and "rules by hand" in data["error"]
+    assert status == 422 and "OpenRouter" in data["error"]
+
+
+def test_nothing_runs_without_jev(app, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    cookie = signed_in(app)
+    status, _, data = call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 7}, cookie)
+    assert status == 409 and "console.typesafe.ai" in data["error"]
+    assert call(app, "GET", "/api/state", cookie=cookie)[2]["jev"]["connected"] is False
+    Account(app.state_dir, EMAIL).update_settings({"schedule": {"frequency": "hourly"}}, now=1_000_000)
+    assert app.scheduler_tick(now=1_000_000 + 7200) == [] and app.fake_runs == []
+
+
+def test_saving_jev_key_verifies_it_first(app, monkeypatch):
+    from inbox_triage.providers.base import ProviderError
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    class Bad:
+        def verify(self):
+            e = ProviderError("no"); e.status = 401; raise e
+    class Good:
+        def verify(self): pass
+    monkeypatch.setattr(webapp, "make_provider", lambda *a, **k: Bad())
+    status, _, data = call(app, "PUT", "/api/keys", {"role": "jev", "key": "wrong"})
+    assert status == 422 and "didn't accept" in data["error"]
+    assert not (app.config_dir / "secrets.json").exists()
+    monkeypatch.setattr(webapp, "make_provider", lambda *a, **k: Good())
+    assert call(app, "PUT", "/api/keys", {"role": "jev", "key": "right"})[0] == 200
+    assert json.loads((app.config_dir / "secrets.json").read_text()) == {"TYPESAFE_API_KEY": "right"}
+    assert (app.config_dir / "secrets.json").stat().st_mode & 0o077 == 0
+    assert call(app, "PUT", "/api/keys", {"role": "openai", "key": "x"})[0] == 400
 
 
 def test_run_job_history_and_single_flight(app):
@@ -233,5 +263,27 @@ def test_bad_inputs_are_400_not_500(app):
     cookie = signed_in(app)
     assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": "abc"}, cookie)[0] == 400
     assert call(app, "GET", f"/api/accounts/{EMAIL}/emails?days=abc", cookie=cookie)[0] == 400
-    assert call(app, "POST", f"/api/accounts/{EMAIL}/interpret", {"provider": "nope", "notes": "x"}, cookie)[0] == 400
-    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"provider": "nope"}, cookie)[0] == 400
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": "x"}}, cookie)[0] == 400
+
+
+def test_each_account_can_bring_its_own_jev_key(app, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    class Good:
+        def verify(self): pass
+    monkeypatch.setattr(webapp, "make_provider", lambda *a, **k: Good())
+    cookie = signed_in(app)
+    assert call(app, "GET", "/api/state", cookie=cookie)[2]["accounts"][0]["jev_connected"] is False
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/jev-key", {"key": "mine"}, cookie)[0] == 200
+    assert Account(app.state_dir, EMAIL).jev_key() == "mine"
+    assert call(app, "GET", "/api/state", cookie=cookie)[2]["accounts"][0]["jev_connected"] is True
+    status, _, _ = call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 1}, cookie)
+    assert status == 200
+    import time
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        time.sleep(.01)
+    assert app.fake_runs[-1][1]["runner_kwargs"]["api_key"] == "mine"
+    # Hosted users can't set the server-wide key, only their own.
+    app.hosted = True
+    assert call(app, "PUT", "/api/keys", {"role": "jev", "key": "x"}, cookie)[0] == 403

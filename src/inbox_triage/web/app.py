@@ -26,7 +26,8 @@ from .. import config, onboarding
 from ..accounts import FREQUENCIES, Account, run_account
 from ..gmail.client import SCOPE, GmailClient, write_private
 from ..preferences import Preferences
-from ..providers import JSON_PROVIDERS, KEY_ENV, LABELS, PROVIDERS, ProviderError, make_provider
+from ..assistant import DEFAULT_MODEL as ASSIST_DEFAULT_MODEL, Assistant
+from ..providers import KEY_ENV, ProviderError, make_provider
 from ..runner import MAX_WINDOW_DAYS, default_token, discover_accounts
 from . import oauth
 
@@ -188,13 +189,15 @@ class App:
             runs = acct.runs(1)
             job = self.jobs.get(email)
             accounts.append({"email": email, "connected": email in connected, "settings": settings,
+                             "jev_connected": bool(acct.jev_key() or config.api_key_for("jev", self.config_dir)),
                              "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
                              "job": job.__dict__ if job else None,
                              "rules": len(acct.preferences().rules)})
-        available = config.available_providers(self.config_dir)
-        return {"accounts": accounts, "hosted": self.hosted, "oauth_configured": oauth.client_config(self.config_dir) is not None,
-                "providers": [{"id": p, "label": LABELS[p], "available": available[p], "key_env": KEY_ENV[p],
-                               "interprets": p in JSON_PROVIDERS} for p in PROVIDERS],
+        return {"accounts": accounts, "hosted": self.hosted,
+                "oauth_configured": oauth.client_config(self.config_dir) is not None,
+                "jev": {"connected": bool(config.api_key_for("jev", self.config_dir)), "signup_url": config.signup_url()},
+                "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
+                              "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
                 "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
 
     # ------------------------------------------------------------------ OAuth
@@ -254,14 +257,26 @@ class App:
         return {"ok": True}
 
     def save_key(self, body: dict) -> dict:
+        """Local mode only: this computer's Jev key (verified first) or the optional assistant key."""
         if self.hosted:
             raise HTTPError(403, "API keys are managed by the operator on hosted servers")
-        provider = str(body.get("provider", ""))
-        env = KEY_ENV.get(provider)
-        if not env:
-            raise HTTPError(400, "This provider doesn't use an API key")
-        config.save_secret(env, str(body.get("key", ""))[:400], self.config_dir)
+        role, key = str(body.get("role", "")), str(body.get("key", "")).strip()[:400]
+        if role not in KEY_ENV:
+            raise HTTPError(400, "Unknown key")
+        if role == "jev" and key:
+            self.verify_jev(key)
+        config.save_secret(KEY_ENV[role], key, self.config_dir)
         return {"ok": True}
+
+    @staticmethod
+    def verify_jev(key: str) -> None:
+        try:
+            make_provider("jev", api_key=key).verify()
+        except ProviderError as exc:
+            status = getattr(exc, "status", None)
+            message = ("Jev didn't accept that key" if status in {401, 403}
+                       else "Couldn't reach Jev to check the key; try again")
+            raise HTTPError(422, message) from None
 
     # ------------------------------------------------------------------ account API
     def account_api(self, method: str, email: str, action: str, body: dict, query: dict):
@@ -273,12 +288,16 @@ class App:
         if (method, action) == ("PUT", "preferences"):
             acct.save_preferences(Preferences.from_json(body))
             return acct.preferences().to_json()
+        if (method, action) == ("PUT", "jev-key"):
+            key = str(body.get("key", "")).strip()[:400]
+            if key:
+                self.verify_jev(key)
+            acct.save_jev_key(key)
+            return {"ok": True}
         if (method, action) == ("POST", "interpret"):
             return self.interpret(acct, body)
         if (method, action) == ("PUT", "settings"):
-            changes = {k: body[k] for k in ("provider", "model", "dry_run", "onboarded", "schedule") if k in body}
-            if changes.get("provider") and changes["provider"] not in PROVIDERS:
-                raise HTTPError(400, "Unknown provider")
+            changes = {k: body[k] for k in ("model", "dry_run", "onboarded", "schedule") if k in body}
             try:
                 return acct.update_settings(changes)
             except (TypeError, ValueError) as exc:
@@ -324,15 +343,11 @@ class App:
         return [{**d, **fetched.get(d["id"], {})} for d in decisions]
 
     def interpret(self, acct: Account, body: dict) -> dict:
-        settings = acct.settings()
         emails = body.get("emails") if isinstance(body.get("emails"), list) else []
         try:
-            name, model, key = config.resolve_provider(settings, body.get("provider"), None, self.config_dir)
-            provider = make_provider(name, model, api_key=key or None)
-            proposed = onboarding.interpret(provider, str(body.get("notes", "")),
+            assistant = Assistant(config.api_key_for("assistant", self.config_dir))
+            proposed = onboarding.interpret(assistant, str(body.get("notes", "")),
                                             [e for e in emails if isinstance(e, dict)][:40])
-        except ValueError as exc:
-            raise HTTPError(400, str(exc)) from None
         except ProviderError as exc:
             raise HTTPError(422, str(exc)) from None
         return proposed.to_json()
@@ -345,6 +360,10 @@ class App:
                 raise HTTPError(400, f"Choose between 1 and {MAX_WINDOW_DAYS} days")
         else:
             days = None
+        try:
+            config.jev_settings(None, None, self.config_dir, Account(self.state_dir, email).jev_key())
+        except config.JevRequired as exc:
+            raise HTTPError(409, str(exc)) from None
         with self.lock:
             current = self.jobs.get(email)
             if current and current.status == "running":
@@ -357,10 +376,10 @@ class App:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
-            name, model, key = config.resolve_provider(settings, None, None, self.config_dir)
+            model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key())
             job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, runner_kwargs={
-                "token": default_token(job.account, self.config_dir), "provider": name, "model": model,
-                "api_key": key or None, "dry_run": dry_run or bool(settings.get("dry_run"))})
+                "token": default_token(job.account, self.config_dir), "model": model,
+                "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "ok"
         except Exception as exc:
             job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
@@ -373,7 +392,7 @@ class App:
                     self.start_job(email, None, False, "schedule")
                     started.append(email)
             except HTTPError:
-                continue  # already running
+                continue  # already running, or Jev isn't connected
         return started
 
 
@@ -418,6 +437,7 @@ def serve(argv=None) -> int:
     if args.public_url and not args.public_url.startswith("https://"):
         parser.error("--public-url must be https://")
     base = args.public_url or f"http://127.0.0.1:{args.port}"
+    config.load_dotenv(Path(".env"), args.config_dir / ".env")
     if not args.public_url:
         # oauthlib insists on HTTPS except for loopback redirects like this one.
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")

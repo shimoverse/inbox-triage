@@ -1,4 +1,4 @@
-"""Turn a user's free-form "ramble" about their inbox into explicit rules."""
+"""Turn a user's typed "ramble" about their inbox into explicit rules (via the optional assistant)."""
 from __future__ import annotations
 
 import json
@@ -38,8 +38,8 @@ SCHEMA = {
 def interpret(provider, notes: str, emails: list[dict]) -> Preferences:
     """``emails`` are the messages the user was looking at: number, from, domain, subject."""
     if not hasattr(provider, "complete_json"):
-        raise ProviderError("This provider can't interpret notes; choose Claude, OpenAI, OpenRouter or Ollama, "
-                            "or add rules by hand")
+        raise ProviderError("Turning notes into rules needs the optional assistant (an OpenRouter key); "
+                            "you can still tag emails and add rules by hand")
     notes = (notes or "").strip()[:MAX_NOTES]
     if not notes:
         return Preferences()

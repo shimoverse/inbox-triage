@@ -1,8 +1,10 @@
-"""Provider-neutral classification questions and answer parsing.
+"""Jev questions and answer parsing.
 
-Every provider answers the same small set of yes/no questions, each with a
-confidence in [0, 1]. The local policy (``policy.py``) turns those signals into
-labels, so swapping providers never changes what the tool is allowed to do.
+Jev answers typed questions about one email: ``noul`` questions return a
+probability that a statement is true, ``choice`` questions pick one option
+with a probability for each. The local policy (``policy.py``) turns those
+signals into labels, so Jev never decides a mailbox action directly.
+See https://docs.typesafe.ai/api.
 """
 from __future__ import annotations
 
@@ -47,40 +49,46 @@ def evidence_state(e: MailEvidence, c: ContextPack, *, subject_chars: int = 200,
 def questions(topics: tuple[str, ...] = LIVE_TOPICS) -> dict:
     out = {}
     for key, (instruction, yes) in BINARY.items():
-        out[key] = {"type": "choice", "instructions": instruction + UNTRUSTED,
-                    "criteria": {"yes": yes, "no": "The evidence does not establish this."}}
+        out[key] = {"type": "noul", "instructions": instruction + UNTRUSTED,
+                    "criteria": {"true": yes, "false": "The evidence does not establish this."}}
     out["category"] = {"type": "choice", "instructions": "Select the best descriptive category; do not decide mailbox actions.",
                        "criteria": dict(CATEGORIES)}
     for key in topics:
-        out["topic_" + key] = {"type": "choice", "instructions": TOPICS[key] + UNTRUSTED,
-                               "criteria": {"yes": "Direct evidence supports this topic.",
-                                            "no": "Direct evidence does not support this topic."}}
+        out["topic_" + key] = {"type": "noul", "instructions": TOPICS[key] + UNTRUSTED,
+                               "criteria": {"true": "Direct evidence supports this topic.",
+                                            "false": "Direct evidence does not support this topic."}}
     return out
 
 
-def answer(answers: dict, key: str, choices) -> tuple[str, float]:
+def _unit(value, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        raise ProviderError(f"Invalid probability: {key}")
+    return float(value)
+
+
+def noul(answers: dict, key: str) -> float:
+    item = answers.get(key)
+    if not isinstance(item, dict) or "noul" not in item:
+        raise ProviderError(f"Invalid answer: {key}")
+    return _unit(item["noul"], key)
+
+
+def choice(answers: dict, key: str, choices) -> tuple[str, float]:
     item = answers.get(key)
     if not isinstance(item, dict) or item.get("choice") not in choices:
         raise ProviderError(f"Invalid answer: {key}")
-    confidence = item.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
-        raise ProviderError(f"Invalid confidence: {key}")
-    return str(item["choice"]), float(confidence)
-
-
-def yes_probability(choice: str, confidence: float) -> float:
-    """Conservative P(yes): low-confidence answers of either kind count as no evidence."""
-    if confidence < .5:
-        return 0.0
-    return confidence if choice == "yes" else 1 - confidence
+    picked = str(item["choice"])
+    probabilities = item.get("probabilities") if isinstance(item.get("probabilities"), dict) else {}
+    confidence = item.get("confidence", probabilities.get(picked))
+    return picked, _unit(confidence, key)
 
 
 def parse_answers(answers, topics: tuple[str, ...] = LIVE_TOPICS) -> JevSignals:
     if not isinstance(answers, dict):
         raise ProviderError("Invalid provider response")
-    probabilities = {key: yes_probability(*answer(answers, key, {"yes", "no"})) for key in BINARY}
-    category, category_confidence = answer(answers, "category", set(CATEGORIES))
-    topic_scores = {key: yes_probability(*answer(answers, "topic_" + key, {"yes", "no"})) for key in topics}
+    probabilities = {key: noul(answers, key) for key in BINARY}
+    category, category_confidence = choice(answers, "category", set(CATEGORIES))
+    topic_scores = {key: noul(answers, "topic_" + key) for key in topics}
     return JevSignals(**probabilities, category=category, category_confidence=category_confidence, topics=topic_scores)
 
 

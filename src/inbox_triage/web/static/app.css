@@ -75,7 +75,6 @@ th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: u
 .stat .k { color: var(--muted); font-size: 12.5px; }
 .stat .v { font-size: 18px; font-weight: 650; }
 .ok { color: var(--good); } .err { color: var(--bad); } .run { color: var(--warn); }
-.mic.live { background: var(--bad); border-color: var(--bad); color: #fff; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 9px; max-width: 90vw; }
 .notice { background: var(--chip); border-radius: 10px; padding: 12px 14px; font-size: 14px; }
 .rule { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }

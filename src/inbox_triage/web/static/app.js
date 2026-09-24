@@ -7,8 +7,6 @@ const FREEMAIL = new Set(["gmail.com", "googlemail.com", "outlook.com", "hotmail
 const WINDOWS = [[1, "Last day"], [7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"]];
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const FREQ_LABEL = { off: "Off (run manually)", hourly: "Every hour", daily: "Every day", weekly: "Every week", monthly: "Last day of every month" };
-const PROVIDER_ORDER = ["openrouter", "openai", "anthropic", "ollama", "jev", "rules"];
-const byOrder = (list) => [...list].sort((a, b) => PROVIDER_ORDER.indexOf(a.id) - PROVIDER_ORDER.indexOf(b.id));
 const OUTCOME_LABEL = { needs_you: "Needs You", updates: "Updates", for_you: "For You", later: "Later", unchanged: "Unchanged",
   excluded: "Skipped (sent/spam)", error: "Model error", deleted: "Deleted", spam: "Suspicious (unchanged)" };
 
@@ -74,7 +72,6 @@ function scheduleText(s) {
   return `Last day of month at ${hour}`;
 }
 const acct = () => STATE.accounts.find((a) => a.email === current);
-const providerInfo = (id) => STATE.providers.find((p) => p.id === id);
 
 // ---------------------------------------------------------------- boot + routing
 async function refresh() {
@@ -157,57 +154,43 @@ function renderOAuthSetup() {
 function renderOnboarding(a) {
   const st = (onboard[a.email] ||= { step: 1, emails: null, tags: {}, notes: "", proposed: null, days: 7, preview: true,
     schedule: { frequency: "daily", hour: 7, weekday: 0 } });
-  const steps = ["Choose your AI", "Tell us what matters", "Timeframe & schedule"];
+  if (st.step === 1 && a.jev_connected && !st.changeKey) st.step = 2;
+  const steps = ["Connect Jev", "Tell us what matters", "Timeframe & schedule"];
   const header = el("div", { class: "steps" }, steps.map((s, i) =>
     el("div", { class: "step" + (i + 1 === st.step ? " now" : i + 1 < st.step ? " done" : "") }, `${i + 1}. ${s}`)));
-  const body = st.step === 1 ? stepProvider(a, st) : st.step === 2 ? stepContext(a, st) : stepSchedule(a, st);
+  const body = st.step === 1 || !a.jev_connected ? stepJev(a, st) : st.step === 2 ? stepContext(a, st) : stepSchedule(a, st);
   mount(el("div", {}, el("h2", {}, `Welcome, ${a.email}`),
     el("p", { class: "muted" }, "Three quick steps. You can change everything later."), header, body));
 }
 
-function stepProvider(a, st) {
-  let chosen = a.settings.provider || (STATE.providers.find((p) => p.available && p.id !== "rules")?.id) || "openrouter";
-  const model = el("input", { type: "text", value: a.settings.model || "", placeholder: "Default model (recommended)" });
-  const key = el("input", { type: "password", placeholder: "Paste API key", autocomplete: "off" });
-  const keyRow = el("div", { class: "stack" });
-  const opts = el("div", { class: "options" });
-  const blurb = {
-    openrouter: "Recommended. One key for OpenAI, Claude, Gemini, Llama and more. Easiest way to try different models.",
-    openai: "OpenAI's API (a ChatGPT subscription doesn't include API access; you need an API key).",
-    anthropic: "Claude by Anthropic. Strong at spotting phishing and what needs you.",
-    ollama: "Runs on this computer with Ollama. Mail never leaves your machine.",
-    jev: "Jev by typesafe.ai, a small model built for yes/no judgments.",
-    rules: "No AI at all. Uses Gmail's own categories. Only labels obvious promotions.",
-  };
-  const drawKey = () => {
-    const p = providerInfo(chosen);
-    fill(keyRow, );
-    if (p.key_env && !STATE.hosted) {
-      keyRow.append(el("label", { class: "small muted" }, p.available ? `API key saved (${p.key_env}). Paste a new one to replace it.` : `API key (${p.key_env})`), key);
-    } else if (p.key_env && STATE.hosted && !p.available) {
-      keyRow.append(el("p", { class: "notice" }, "This server hasn't enabled that provider yet."));
-    }
-    if (chosen !== "rules") keyRow.append(el("label", { class: "small muted" }, "Model (optional)"), model);
-  };
-  const draw = () => {
-    fill(opts, ...byOrder(STATE.providers).map((p) => el("button", { type: "button", class: "option" + (p.id === chosen ? " selected" : ""),
-      onclick: () => { chosen = p.id; draw(); } }, el("div", { class: "t" }, p.label), el("div", { class: "small muted" }, blurb[p.id] || ""),
-      p.available ? el("span", { class: "chip" }, "ready") : null)));
-    drawKey();
-  };
-  draw();
-  const next = async () => {
+// Jev is required: every triage decision is a typed Jev answer.
+function jevCta() {
+  return el("a", { class: "btn", href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "Don't have Jev yet? Get a Jev key →");
+}
+
+function jevKeyForm(a, onDone) {
+  const key = el("input", { type: "password", placeholder: "Paste your Jev API key", autocomplete: "off", "aria-label": "Jev API key" });
+  const go = async (e) => {
+    e.preventDefault();
+    const btn = e.submitter || e.target.querySelector("button[type=submit]");
+    if (!key.value.trim()) return toast("Paste your Jev API key first.");
+    btn.disabled = true; btn.textContent = "Checking with Jev…";
     try {
-      if (key.value.trim()) await api("keys", "PUT", { provider: chosen, key: key.value.trim() });
-      await api(acctPath(a.email, "settings"), "PUT", { provider: chosen, model: model.value.trim() });
-      STATE = await api("state");
-      if (!providerInfo(chosen).available) return toast("Add an API key for this provider first.");
-      st.step = 2; render();
-    } catch (err) { toast(err.message); }
+      await api(acctPath(a.email, "jev-key"), "PUT", { key: key.value.trim() });
+      STATE = await api("state"); toast("Jev connected."); onDone();
+    } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = "Connect Jev"; }
   };
-  return el("div", { class: "card stack" }, el("h3", {}, "Which AI should read your mail?"),
-    el("p", { class: "small muted" }, "It only sees the sender's domain, subject, and a short cleaned excerpt, and answers yes/no questions. Your labels are decided by fixed local rules."),
-    opts, keyRow, el("div", { class: "row" }, el("button", { class: "btn primary", onclick: next }, "Continue")));
+  return el("form", { class: "stack", onsubmit: go }, key,
+    el("div", { class: "row" }, el("button", { class: "btn primary", type: "submit" }, "Connect Jev"), jevCta()));
+}
+
+function stepJev(a, st) {
+  return el("div", { class: "card stack" },
+    el("h3", {}, "Inbox Triage runs on Jev"),
+    el("p", {}, "Jev by TypeSafe is a “System One” model: instead of writing text, it makes fast, typed decisions with calibrated confidence — " +
+      "is this waiting on you, an update, bulk mail, phishing? Every email is judged by Jev in a fraction of a second, for a tiny fraction of a cent."),
+    el("p", { class: "small muted" }, "Jev only sees the sender's domain, the subject, and a short cleaned excerpt. Fixed local rules turn its answers into Gmail labels."),
+    jevKeyForm(a, () => { st.step = 2; render(); }));
 }
 
 function ruleForEmail(m, action) {
@@ -218,12 +201,12 @@ function ruleForEmail(m, action) {
 
 function stepContext(a, st) {
   const list = el("ul", { class: "mail", "aria-label": "Recent emails" }, el("li", { class: "muted" }, "Loading your recent emails…"));
-  const notes = el("textarea", { value: st.notes, placeholder: "Talk or type as you look through your emails. For example:\n" +
+  const notes = el("textarea", { value: st.notes, placeholder: "Type freely as you look through your emails. For example:\n" +
     "“#2 is from my kids' school — that's always important. I don't care about real estate emails. " +
-    "The bank alerts matter. Newsletters from shops can wait.”", "aria-label": "Your notes", oninput: () => (st.notes = notes.value) });
+    "The bank alerts matter. Newsletters from shops can wait.”\n\n" +
+    "Tip: prefer talking? Ramble into Open Voice Flow or any voice-to-text app and paste the text here.",
+    "aria-label": "Your notes", oninput: () => (st.notes = notes.value) });
   const proposedBox = el("div", { class: "stack" });
-  const mic = el("button", { class: "btn mic", type: "button" }, "🎤 Dictate");
-  setupDictation(mic, notes, st);
 
   const drawList = () => {
     if (!st.emails) return;
@@ -256,10 +239,16 @@ function stepContext(a, st) {
     btn.disabled = false; btn.textContent = "Turn my notes into rules";
   };
   const interpretBtn = el("button", { class: "btn", type: "button", onclick: (e) => interpret(e.currentTarget) }, "Turn my notes into rules");
-  if (!providerInfo(a.settings.provider)?.interprets) {
-    interpretBtn.disabled = true;
-    interpretBtn.title = "Choose Claude, OpenAI, OpenRouter or Ollama to interpret notes";
-  }
+  const assistantBox = el("div", { class: "stack" });
+  const drawAssistant = () => {
+    interpretBtn.disabled = !STATE.assistant.available;
+    if (STATE.assistant.available) return fill(assistantBox);
+    fill(assistantBox, el("p", { class: "notice small" },
+      "Turning notes into rules uses an optional assistant (", STATE.assistant.model, " via OpenRouter). ",
+      STATE.hosted ? "It isn't enabled on this server — tag emails instead." : "Add an OpenRouter key to enable it, or just tag emails on the left."),
+      STATE.hosted ? null : assistantKeyForm(drawAssistant));
+  };
+  drawAssistant();
 
   const allRules = () => {
     const quick = Object.entries(st.tags).filter(([, v]) => v).map(([id, action]) => ruleForEmail(st.emails.find((m) => m.id === id), action));
@@ -273,7 +262,7 @@ function stepContext(a, st) {
         el("span", { class: "tagged " + r.action }, r.action === "important" ? "Important" : "Can wait"),
         el("span", { class: "v" }, `${r.kind}: ${r.value}`), el("span", { class: "small muted note" }, r.note || "")))) :
         el("p", { class: "small muted" }, "Tag a few emails or write some notes, then turn them into rules."),
-      st.proposed?.summary ? el("p", { class: "notice small" }, "What the assistant will keep in mind: ", st.proposed.summary) : null);
+      st.proposed?.summary ? el("p", { class: "notice small" }, "What Jev will keep in mind: ", st.proposed.summary) : null);
   };
   drawProposed();
   const observer = () => drawProposed();
@@ -296,8 +285,8 @@ function stepContext(a, st) {
         el("p", { class: "small muted" }, "Tap Important or Not important on a few. These stay on your computer as rules."), list),
       el("div", { class: "card stack" }, el("h3", {}, "Ramble about your inbox"),
         el("p", { class: "small muted" }, "Say what matters and what doesn't, in your own words. Mention emails by number."),
-        notes, el("div", { class: "row" }, mic, interpretBtn),
-        el("p", { class: "small muted" }, "Dictation uses your browser's speech recognition (in Chrome, audio goes to Google). Your notes go to the AI you chose, once, to create rules."),
+        notes, el("div", { class: "row" }, interpretBtn), assistantBox,
+        el("p", { class: "small muted" }, "Your notes go once to the assistant to propose rules; you review them before anything is saved. Jev makes every email decision."),
         proposedBox)),
     el("div", { class: "row" },
       el("button", { class: "btn ghost", onclick: () => { st.step = 1; render(); } }, "Back"),
@@ -312,22 +301,14 @@ function insertRef(textarea, st, n, m) {
   st.notes = textarea.value; textarea.focus();
 }
 
-function setupDictation(button, textarea, st) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { button.disabled = true; button.title = "Dictation isn't supported in this browser; type instead."; return; }
-  let rec = null;
-  button.addEventListener("click", () => {
-    if (rec) { rec.stop(); return; }
-    rec = new SR(); rec.continuous = true; rec.interimResults = false; rec.lang = navigator.language || "en-US";
-    rec.onresult = (ev) => {
-      for (let i = ev.resultIndex; i < ev.results.length; i++) if (ev.results[i].isFinal)
-        textarea.value += (textarea.value && !textarea.value.endsWith(" ") ? " " : "") + ev.results[i][0].transcript.trim() + " ";
-      st.notes = textarea.value;
-    };
-    rec.onend = () => { rec = null; button.classList.remove("live"); button.textContent = "🎤 Dictate"; };
-    rec.onerror = (e) => toast("Dictation stopped: " + e.error);
-    rec.start(); button.classList.add("live"); button.textContent = "■ Stop";
-  });
+function assistantKeyForm(onDone) {
+  const key = el("input", { type: "password", placeholder: "OpenRouter API key (optional)", autocomplete: "off", "aria-label": "OpenRouter API key" });
+  const save = async () => {
+    try { await api("keys", "PUT", { role: "assistant", key: key.value.trim() }); STATE = await api("state"); toast("Assistant saved."); onDone(); }
+    catch (err) { toast(err.message); }
+  };
+  return el("div", { class: "row" }, key, el("button", { class: "btn", type: "button", onclick: save }, "Save key"),
+    el("a", { href: "https://openrouter.ai/keys", target: "_blank", rel: "noopener", class: "small" }, "Get an OpenRouter key"));
 }
 
 function scheduleFields(sched, onChange) {
@@ -382,14 +363,15 @@ function renderDashboard(a) {
   const stats = el("div", { class: "grid4" },
     stat("Last run", last ? ago(last.started) : "never", last ? (last.status === "ok" ? `${last.processed} emails · ${last.gmail_changes} labeled` : last.error || "") : ""),
     stat("Next run", a.next_run ? when(a.next_run) : "—", scheduleText(a.settings.schedule)),
-    stat("AI", providerInfo(a.settings.provider)?.label || "Default", a.settings.model || "default model"),
+    stat("Jev decisions", last && last.jev_calls ? `${last.jev_calls}` : "—",
+      last && last.jev_calls ? `${Math.round(last.jev_ms / last.jev_calls)} ms average per email` : (a.settings.model || "jev-latest")),
     stat("Mode", a.settings.dry_run ? "Preview only" : "Adding labels", `${a.rules} personal rules`));
 
   const days = el("select", { "aria-label": "Window" }, el("option", { value: "" }, "New mail since last run"),
     WINDOWS.map(([d, l]) => el("option", { value: d }, l)));
   const dry = el("input", { type: "checkbox", id: "dry" });
   const running = job && job.status === "running";
-  const runBtn = el("button", { class: "btn primary", disabled: running, onclick: async () => {
+  const runBtn = el("button", { class: "btn primary", disabled: running || !a.jev_connected, onclick: async () => {
     try { await api(acctPath(a.email, "run"), "POST", { days: days.value ? +days.value : null, dry_run: dry.checked }); await refresh(); }
     catch (err) { toast(err.message); } } }, running ? "Running…" : "Run now");
   const jobLine = job ? el("p", { class: "small " + (job.status === "running" ? "run" : job.status === "ok" ? "ok" : "err") },
@@ -404,6 +386,9 @@ function renderDashboard(a) {
     .catch((err) => fill(history, el("p", { class: "err" }, err.message)));
 
   mount(el("div", {},
+    a.jev_connected ? null : el("div", { class: "card stack" }, el("h2", {}, "Reconnect Jev to keep sorting"),
+      el("p", { class: "muted" }, "Inbox Triage needs Jev to make decisions. Scheduled runs are paused until it's connected."),
+      jevKeyForm(a, refresh)),
     stats,
     el("div", { class: "card stack" }, el("h2", {}, "Run"),
       el("div", { class: "row" }, days, el("label", { class: "row", for: "dry" }, dry, "Preview only"), runBtn), jobLine),
@@ -468,12 +453,11 @@ function preferencesCard(a) {
 
 function settingsCard(a) {
   const sched = { ...a.settings.schedule };
-  const provider = el("select", {}, byOrder(STATE.providers).map((p) => el("option", { value: p.id, selected: p.id === a.settings.provider }, p.label + (p.available ? "" : " (needs key)"))));
-  const model = el("input", { type: "text", value: a.settings.model || "", placeholder: "Default model" });
+  const model = el("input", { type: "text", value: a.settings.model || "", placeholder: "jev-latest" });
   const preview = el("input", { type: "checkbox", checked: a.settings.dry_run, id: "pm" });
   const save = async () => {
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { provider: provider.value, model: model.value.trim(), dry_run: preview.checked, schedule: sched });
+      await api(acctPath(a.email, "settings"), "PUT", { model: model.value.trim(), dry_run: preview.checked, schedule: sched });
       toast("Settings saved."); await refresh();
     } catch (err) { toast(err.message); }
   };
@@ -481,13 +465,20 @@ function settingsCard(a) {
     if (!confirm(`Disconnect ${a.email}? Existing labels stay in Gmail; Inbox Triage stops until you sign in again.`)) return;
     await api(`accounts/${encodeURIComponent(a.email)}`, "DELETE"); await refresh();
   };
+  const assistantBox = el("div", { class: "stack" });
+  const drawAssistant = () => fill(assistantBox,
+    el("label", { class: "small muted" }, `Notes assistant (optional): ${STATE.assistant.model}`),
+    STATE.assistant.available ? el("p", { class: "small ok" }, "Connected via OpenRouter.") :
+      STATE.hosted ? el("p", { class: "small muted" }, "Not enabled on this server.") : assistantKeyForm(drawAssistant));
+  drawAssistant();
   return el("div", { class: "card stack" }, el("h2", {}, "Settings"),
     el("div", { class: "grid2" },
-      el("div", { class: "stack" }, el("label", { class: "small muted" }, "AI provider"), provider, el("label", { class: "small muted" }, "Model"), model),
+      el("div", { class: "stack" }, el("label", { class: "small muted" }, "Jev model"), model, assistantBox),
       el("div", { class: "stack" }, el("label", { class: "small muted" }, "Schedule"), scheduleFields(sched),
         el("label", { class: "row", for: "pm" }, preview, "Preview mode (never change Gmail)"))),
     el("div", { class: "row" }, el("button", { class: "btn primary", onclick: save }, "Save settings"),
-      el("button", { class: "btn ghost", onclick: () => { onboard[a.email] = null; a.settings.onboarded = false; renderOnboarding(a); } }, "Change AI provider or key"),
+      el("button", { class: "btn ghost", onclick: () => { onboard[a.email] = { step: 1, changeKey: true, emails: null, tags: {}, notes: "", proposed: null,
+        days: 7, preview: false, schedule: { ...a.settings.schedule } }; renderOnboarding(a); } }, "Change Jev key"),
       el("button", { class: "btn bad", onclick: disconnect }, "Disconnect account")));
 }
 

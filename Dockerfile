@@ -5,7 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --locked --no-dev --extra anthropic
+RUN uv sync --locked --no-dev
 RUN useradd --create-home --uid 10001 triage && mkdir /data && chown triage /data
 USER triage
 VOLUME /data

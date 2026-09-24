@@ -19,7 +19,7 @@ from .context import bootstrap_context, build_context, sync_incremental
 from .gmail.client import GmailClient
 from .gmail.extract import extract_gmail_message
 from .policy import decide
-from .providers import PROVIDERS, ProviderError, make_provider
+from .providers import ProviderError, make_provider
 from .store import TriageStore
 
 try:  # POSIX
@@ -212,6 +212,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
     outcomes, seen, calls, changed, failures = Counter(), 0, 0, 0, 0
     tokens = Counter()
     consecutive = 0
+    jev_seconds = 0.0
     complete = True
 
     def record(event: dict) -> None:
@@ -253,7 +254,9 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                     if prefs.summary:
                         context = dataclasses.replace(context, user_notes=prefs.summary)
                     try:
+                        started = time.perf_counter()
                         signals, usage = provider.classify_with_usage(evidence, context)
+                        jev_seconds += time.perf_counter() - started
                     except ProviderError:
                         # One malformed answer must not wedge the account: retry on later
                         # runs, then give up and leave the message unchanged.
@@ -288,15 +291,16 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
         compact_events(journal, events, now)
     return {"account": account, "mode": "dry-run" if dry_run else "label-only", "provider": provider_name,
             "processed": seen, "outcomes": dict(sorted(outcomes.items())), "model_calls": calls,
-            "jev_calls": calls if provider_name == "jev" else 0, "provider_failures": failures,
+            "jev_calls": calls, "jev_ms": round(jev_seconds * 1000), "provider_failures": failures,
             "tokens": dict(tokens), "frontier_calls": 0, "gmail_changes": changed,
             "remaining": not complete, "cursor_advanced": complete and not dry_run}
 
 
 def main(argv=None) -> int:
     from .accounts import Account, run_account
-    from .config import resolve_provider
-    parser = argparse.ArgumentParser(description="Private Gmail triage; label-only unless --dry-run")
+    from .config import CONFIG_DIR as _cfg, JevRequired, jev_settings, load_dotenv
+    load_dotenv(Path(".env"), _cfg / ".env")
+    parser = argparse.ArgumentParser(description="Private Gmail triage powered by Jev; label-only unless --dry-run")
     who = parser.add_mutually_exclusive_group(required=True)
     who.add_argument("--account", action="append", help="Gmail address to triage (repeatable)")
     who.add_argument("--all", action="store_true", help="Triage every connected account")
@@ -305,9 +309,7 @@ def main(argv=None) -> int:
                         help="Workspace service-account key with domain-wide delegation (instead of --token)")
     parser.add_argument("--config-dir", type=Path, default=CONFIG_DIR)
     parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
-    parser.add_argument("--provider", choices=PROVIDERS,
-                        help="Default: the account's setting from the web app, else INBOX_TRIAGE_PROVIDER, else jev")
-    parser.add_argument("--model", help="Provider model override")
+    parser.add_argument("--model", help="Jev model override (default jev-latest)")
     parser.add_argument("--max", type=int, default=MAX_PER_RUN, help="Messages per batch (1-100)")
     parser.add_argument("--days", type=int, help=f"Rescan the last N days (1-{MAX_WINDOW_DAYS}) instead of continuing")
     parser.add_argument("--due", action="store_true",
@@ -330,17 +332,18 @@ def main(argv=None) -> int:
                 continue
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
-            provider, model, api_key = resolve_provider(settings, args.provider, args.model, args.config_dir)
+            model, api_key = jev_settings(settings, args.model, args.config_dir,
+                                          Account(args.state_dir, account).jev_key())
             result = run_account(account, args.state_dir, trigger="schedule" if args.due else "cli", days=args.days,
                                  runner_kwargs={"token": token, "max_messages": args.max,
                                                 "dry_run": args.dry_run or bool(settings.get("dry_run")),
-                                                "provider": provider, "model": model, "api_key": api_key or None,
+                                                "model": model, "api_key": api_key,
                                                 "service_account": args.service_account})
             print(json.dumps(result, sort_keys=True))
         except Exception as exc:
             # By default never print provider responses, message metadata, IDs, or credentials.
             error = {"account": account, "status": "error", "type": type(exc).__name__}
-            if args.verbose:
+            if args.verbose or isinstance(exc, JevRequired):
                 error["message"] = str(exc)
             print(json.dumps(error), file=sys.stderr)
             status = 1

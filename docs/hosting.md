@@ -1,8 +1,10 @@
-# Packaging and hosting: so users only click "Sign in with Google"
+# Hosting (Path 1) and packaging: users only click "Sign in with Google"
 
 Gmail access always needs a Google OAuth client, and someone has to create it once. This guide is for that someone: a maintainer shipping a build, or an operator running a server. End users never see any of it.
 
 ## 1. Create the Google OAuth client (once)
+
+The full checklist is in [google-cloud-setup.md](google-cloud-setup.md). In short:
 
 1. In the [Google Cloud console](https://console.cloud.google.com/projectcreate), create a project and enable the **Gmail API**.
 2. **Google Auth Platform → Branding:** set the app name, a support email, and (for hosting) your homepage and privacy policy URLs.
@@ -39,7 +41,7 @@ That's fine for yourself, family, a team, or a beta. To remove the cap for the p
 docker build -t inbox-triage .
 docker run -d --name inbox-triage -p 127.0.0.1:8765:8765 \
   -e INBOX_TRIAGE_OAUTH_CLIENT_ID=... -e INBOX_TRIAGE_OAUTH_CLIENT_SECRET=... \
-  -e OPENROUTER_API_KEY=... -e INBOX_TRIAGE_PROVIDER=openrouter \
+  -e OPENROUTER_API_KEY=... \
   -v inbox-triage-data:/data \
   inbox-triage --public-url https://triage.example.com
 ```
@@ -48,7 +50,8 @@ Put a TLS reverse proxy (Caddy, nginx, a cloud load balancer) in front of port 8
 
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
-- API keys and the OAuth client come from the operator's environment, and users can't change them;
+- **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail, so the server never pays for users' Jev usage;
+- the OAuth client and the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default) come from the operator's environment;
 - the built-in scheduler runs every account's schedule, so keep one instance running;
 - OAuth tokens, per-account state, and rules live under `/data`. Back it up **encrypted**: it grants access to users' mailboxes.
 

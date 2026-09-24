@@ -12,7 +12,7 @@ from . import preferences as prefs_mod
 from .gmail.client import write_private
 
 FREQUENCIES = ("off", "hourly", "daily", "weekly", "monthly")
-DEFAULT_SETTINGS = {"provider": "", "model": "", "dry_run": False, "onboarded": False,
+DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
                     "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0}}
 MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
 
@@ -41,7 +41,7 @@ class Account:
 
     def update_settings(self, changes: dict, now: int | None = None) -> dict:
         current = self.settings()
-        for key in ("provider", "model"):
+        for key in ("model",):
             if key in changes:
                 current[key] = str(changes[key] or "")[:120]
         for key in ("dry_run", "onboarded"):
@@ -58,6 +58,16 @@ class Account:
             current["schedule"] = sched
         write_private(self.dir / "settings.json", json.dumps(current, sort_keys=True))
         return current
+
+    # -- Jev key (per account, so a hosted server never pays for users' Jev) --
+    def jev_key(self) -> str:
+        try:
+            return str(json.loads((self.dir / "secrets.json").read_text(encoding="utf-8")).get("TYPESAFE_API_KEY", ""))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return ""
+
+    def save_jev_key(self, key: str) -> None:
+        write_private(self.dir / "secrets.json", json.dumps({"TYPESAFE_API_KEY": key} if key else {}))
 
     # -- preferences ------------------------------------------------------
     def preferences(self) -> prefs_mod.Preferences:
@@ -157,16 +167,16 @@ def run_account(account: str, state_root: Path, *, trigger: str = "manual", days
     from . import runner
     started = int(now if now is not None else time.time())
     acct = Account(state_root, account)
-    totals: dict = {"processed": 0, "gmail_changes": 0, "model_calls": 0, "provider_failures": 0, "outcomes": {}}
+    totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0, "outcomes": {}}
     entry = {"started": started, "trigger": trigger, "days": days}
     try:
         for _ in range(MAX_BATCHES):
             result = runner.run(account, root=state_root, since_days=days, now=now, **(runner_kwargs or {}))
-            for key in ("processed", "gmail_changes", "model_calls", "provider_failures"):
+            for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures"):
                 totals[key] += int(result.get(key, 0))
             for key, value in result.get("outcomes", {}).items():
                 totals["outcomes"][key] = totals["outcomes"].get(key, 0) + value
-            totals.update({k: result[k] for k in ("mode", "provider", "remaining") if k in result})
+            totals.update({k: result[k] for k in ("mode", "remaining") if k in result})
             if not result.get("remaining") or result.get("mode") == "dry-run" or not result.get("processed"):
                 break
         entry.update(status="ok", **totals)
