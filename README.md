@@ -55,7 +55,7 @@ Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned 
 4. **Pick a timeframe** (last day, 7, 30 or 90 days, optionally preview-only) **and a schedule** (hourly, daily, weekly, or the last day of each month).
 5. **Watch the dashboard:** last and next run, Jev decisions and speed, run history, recently labeled mail with links into Gmail, and your rules.
 
-*Operators:* see [docs/hosting.md](docs/hosting.md) to deploy, and [docs/google-cloud-setup.md](docs/google-cloud-setup.md) for the one-time Google Cloud work.
+*Operators:* deploying takes one command on a small Linux server (`sudo DOMAIN=… bash deploy/install.sh`; no Docker needed). See [docs/hosting.md](docs/hosting.md), plus [docs/google-cloud-setup.md](docs/google-cloud-setup.md) for the one-time Google Cloud work.
 
 ### Path 2: clone and run it yourself
 

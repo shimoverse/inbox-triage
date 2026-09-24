@@ -1,0 +1,6 @@
+# Written to /etc/caddy/Caddyfile by deploy/install.sh ({DOMAIN} is replaced).
+# Caddy obtains and renews the HTTPS certificate automatically.
+{DOMAIN} {
+	encode gzip
+	reverse_proxy 127.0.0.1:8765
+}

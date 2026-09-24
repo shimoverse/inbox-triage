@@ -308,3 +308,8 @@ def test_hosted_server_never_uses_its_own_jev_key_for_users(app, monkeypatch):
             break
         time.sleep(.01)
     assert app.fake_runs[-1][1]["runner_kwargs"]["api_key"] == "users-own-key"
+
+
+def test_healthz_is_open_and_leaks_nothing(app):
+    status, _, data = call(app, "GET", "/healthz", headers={"HTTP_HOST": "10.0.0.5:8765"})
+    assert status == 200 and data["ok"] is True and set(data) == {"ok", "version"}

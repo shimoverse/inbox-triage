@@ -1,0 +1,33 @@
+# Inbox Triage hosted server (Path 1). Installed by deploy/install.sh.
+[Unit]
+Description=Inbox Triage (Jev-powered Gmail labels)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=triage
+Group=triage
+WorkingDirectory=/opt/inbox-triage
+# OAuth client, public URL and optional OpenRouter key. Never put a Jev key here:
+# hosted mode ignores it, and every user connects their own.
+EnvironmentFile=/etc/inbox-triage/env
+ExecStart=/opt/inbox-triage/.venv/bin/inbox-triage-web --host 127.0.0.1 --port 8765 --no-browser \
+    --public-url ${PUBLIC_URL} --config-dir /var/lib/inbox-triage/config --state-dir /var/lib/inbox-triage/state
+Restart=on-failure
+RestartSec=5
+UMask=0077
+# Hardening: the service can only write its own data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/inbox-triage
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

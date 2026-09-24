@@ -37,25 +37,35 @@ That's fine for yourself, family, a team, or a beta. To remove the cap for the p
 
 ## 4. Run a hosted server
 
+You need one small Linux VM (Debian or Ubuntu; 1 vCPU and 1–2 GB RAM is plenty), a DNS name pointing at it, and ports 80 and 443 open. **Docker isn't needed.**
+
 ```bash
-docker build -t inbox-triage .
-docker run -d --name inbox-triage -p 127.0.0.1:8765:8765 \
-  -e INBOX_TRIAGE_OAUTH_CLIENT_ID=... -e INBOX_TRIAGE_OAUTH_CLIENT_SECRET=... \
-  -e OPENROUTER_API_KEY=... \
-  -v inbox-triage-data:/data \
-  inbox-triage --public-url https://triage.example.com
+git clone https://github.com/shimoverse/inbox-triage.git && cd inbox-triage
+sudo DOMAIN=triage.example.com bash deploy/install.sh
+sudoedit /etc/inbox-triage/env        # paste the Google OAuth client ID/secret (+ optional OPENROUTER_API_KEY)
+sudo systemctl restart inbox-triage
+curl -s https://triage.example.com/healthz
 ```
 
-Put a TLS reverse proxy (Caddy, nginx, a cloud load balancer) in front of port 8765. In hosted mode:
+The script installs:
+- the app from `uv.lock` into `/opt/inbox-triage`;
+- a hardened **systemd** service (`deploy/inbox-triage.service`), which runs as its own user, can write only to `/var/lib/inbox-triage`, and restarts on failure;
+- **Caddy**, which gets and renews the HTTPS certificate automatically.
+
+Update later with `sudo bash /opt/inbox-triage/deploy/update.sh`. Logs are in `journalctl -u inbox-triage`; they contain run summaries with opaque account tags, never addresses or mail content.
+
+In hosted mode:
 
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
 - **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** any server-wide `TYPESAFE_API_KEY`, so the operator can never end up paying for other users' Jev usage;
-- the OAuth client and the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default) come from the operator's environment;
-- the built-in scheduler runs every account's schedule, so keep one instance running;
-- OAuth tokens, per-account state, and rules live under `/data`. Back it up **encrypted**: it grants access to users' mailboxes.
+- the OAuth client and the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default) come from `/etc/inbox-triage/env`;
+- the built-in scheduler runs every account's schedule, so run exactly one instance;
+- `/var/lib/inbox-triage` holds users' Google tokens, Jev keys, and rules. Use an encrypted disk and encrypted snapshots, and restrict SSH.
 
 You are now processing other people's mail: publish a privacy policy, delete data when someone disconnects (the app revokes the Google grant and deletes the token), and follow Google's [API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy).
+
+**Prefer containers?** A `Dockerfile` is included as an alternative: mount `/data`, pass the same environment variables, add `--public-url https://…`, and put any TLS proxy in front of port 8765.
 
 ## 5. Alternatives if you want zero Google setup
 
