@@ -64,6 +64,9 @@ OPENROUTER_API_KEY=
 ENV
 fi
 
+# Earlier templates defaulted to a fixed beta end date; drop exactly that default (a date set on purpose stays).
+[ -f "$ENV_FILE" ] && sed -i '/^INBOX_TRIAGE_BETA_ENDS=2026-10-31$/d' "$ENV_FILE"
+
 echo "==> systemd"
 install -m 0644 "$APP_DIR/deploy/inbox-triage.service" /etc/systemd/system/inbox-triage.service
 systemctl daemon-reload
