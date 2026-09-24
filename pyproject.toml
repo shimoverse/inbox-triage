@@ -4,11 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inbox-triage"
-version = "0.1.0"
-description = "Private, label-only Gmail triage with Jev and no frontier-model orchestrator"
+version = "0.2.0"
+description = "Private, label-only Gmail triage: an LLM answers a few questions, a local policy adds labels"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+authors = [{ name = "Shimoverse" }]
+keywords = ["gmail", "email", "triage", "llm", "labels", "privacy", "ollama", "claude"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Communications :: Email",
+]
 dependencies = ["google-api-python-client>=2.0", "google-auth>=2.0", "google-auth-oauthlib>=1.2"]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/shimoverse/inbox-triage"
+Issues = "https://github.com/shimoverse/inbox-triage/issues"
 
 [project.scripts]
 inbox-triage = "inbox_triage.runner:main"

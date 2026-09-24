@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
-from .models import RoutingDecision
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS messages (
- account_hash TEXT NOT NULL, message_key TEXT NOT NULL, evidence_hash TEXT NOT NULL,
- rubric_version TEXT NOT NULL, destination TEXT NOT NULL, confidence REAL NOT NULL,
- reason_code TEXT NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- PRIMARY KEY(account_hash, message_key, rubric_version)
-);
-CREATE TABLE IF NOT EXISTS message_topics (
- account_hash TEXT NOT NULL, message_key TEXT NOT NULL, rubric_version TEXT NOT NULL,
- topic TEXT NOT NULL, confidence REAL NOT NULL,
- PRIMARY KEY(account_hash, message_key, rubric_version, topic)
-);
 CREATE TABLE IF NOT EXISTS history_cursor (
  account_hash TEXT PRIMARY KEY, history_id TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -28,20 +17,6 @@ CREATE TABLE IF NOT EXISTS context_facts (
  PRIMARY KEY(account_hash, kind, subject_key, topic)
 );
 CREATE INDEX IF NOT EXISTS context_lookup ON context_facts(account_hash,kind,subject_key,expires_at);
-CREATE TABLE IF NOT EXISTS engagement_events (
- id INTEGER PRIMARY KEY, account_hash TEXT NOT NULL, message_key TEXT NOT NULL,
- event_type TEXT NOT NULL, observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- UNIQUE(account_hash, message_key, event_type, observed_at)
-);
-CREATE TABLE IF NOT EXISTS priorities (
- account_hash TEXT NOT NULL, priority_id TEXT NOT NULL, label TEXT NOT NULL,
- starts_at TEXT NOT NULL, expires_at TEXT NOT NULL, confidence REAL NOT NULL,
- source TEXT NOT NULL, PRIMARY KEY(account_hash, priority_id)
-);
-CREATE TABLE IF NOT EXISTS rubrics (
- version TEXT PRIMARY KEY, sha256 TEXT NOT NULL, provider_model TEXT NOT NULL,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 """
 def opaque(value: str) -> str: return hashlib.sha256(value.encode()).hexdigest()
 
@@ -50,19 +25,13 @@ def scoped_key(account: str, kind: str, value: str) -> str:
 
 class TriageStore:
     def __init__(self, path: str | Path):
-        self.path = Path(path); self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = Path(path); self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(self.path); self.db.executescript(_SCHEMA)
+        os.chmod(self.path, 0o600)
     def close(self): self.db.close()
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
-    def save_decision(self, account: str, message_id: str, evidence_fingerprint: str, rubric: str, d: RoutingDecision):
-        ah, mk = opaque(account.casefold()), scoped_key(account,"message",message_id)
-        reason_code = hashlib.sha256(d.reason.encode()).hexdigest()[:16]
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO messages(account_hash,message_key,evidence_hash,rubric_version,destination,confidence,reason_code) VALUES(?,?,?,?,?,?,?)",
-                (ah,mk,opaque(evidence_fingerprint),rubric,d.destination.value,d.confidence,reason_code))
-            self.db.execute("DELETE FROM message_topics WHERE account_hash=? AND message_key=? AND rubric_version=?",(ah,mk,rubric))
-            self.db.executemany("INSERT INTO message_topics VALUES(?,?,?,?,?)",[(ah,mk,rubric,t,float(d.topics.confidence[t])) for t in d.topics.topics])
+
     def set_cursor(self, account: str, history_id: str):
         with self.db: self.db.execute("INSERT INTO history_cursor(account_hash,history_id) VALUES(?,?) ON CONFLICT(account_hash) DO UPDATE SET history_id=excluded.history_id,updated_at=CURRENT_TIMESTAMP",(opaque(account.casefold()),history_id))
     def get_cursor(self, account: str) -> str | None:
@@ -79,18 +48,12 @@ class TriageStore:
         row=self.db.execute("SELECT 1 FROM context_facts WHERE account_hash=? AND kind=? AND subject_key=? AND expires_at>? LIMIT 1",
           (opaque(account.casefold()),kind,scoped_key(account,kind,value),now)).fetchone()
         return bool(row)
-    def fact_count(self, account: str, kind: str, value: str, now: int) -> int:
-        row=self.db.execute("SELECT count(*) FROM context_facts WHERE account_hash=? AND kind=? AND subject_key=? AND expires_at>?",
-          (opaque(account.casefold()),kind,scoped_key(account,kind,value),now)).fetchone()
-        return int(row[0])
+
     def topics_for(self, account: str, kind: str, value: str, now: int) -> tuple[str,...]:
         rows=self.db.execute("SELECT DISTINCT topic FROM context_facts WHERE account_hash=? AND kind=? AND subject_key=? AND expires_at>? AND topic<>'' ORDER BY topic LIMIT 5",
           (opaque(account.casefold()),kind,scoped_key(account,kind,value),now)).fetchall()
         return tuple(r[0] for r in rows)
-    def active_priorities(self, account: str, now_iso: str) -> tuple[str,...]:
-        rows=self.db.execute("SELECT label FROM priorities WHERE account_hash=? AND starts_at<=? AND expires_at>? AND confidence>=.8 ORDER BY expires_at LIMIT 5",
-          (opaque(account.casefold()),now_iso,now_iso)).fetchall()
-        return tuple(r[0] for r in rows)
+
     def prune_context(self, account: str, now: int, max_rows: int = 5000):
         ah=opaque(account.casefold())
         with self.db:
@@ -99,5 +62,3 @@ class TriageStore:
               SELECT rowid FROM context_facts WHERE account_hash=? ORDER BY occurred_at DESC LIMIT -1 OFFSET ?)""",(ah,max_rows))
     def context_count(self, account: str) -> int:
         return int(self.db.execute("SELECT count(*) FROM context_facts WHERE account_hash=?",(opaque(account.casefold()),)).fetchone()[0])
-    def counts(self, account: str) -> dict[str,int]:
-        return dict(self.db.execute("SELECT destination,count(*) FROM messages WHERE account_hash=? GROUP BY destination",(opaque(account.casefold()),)).fetchall())
