@@ -1,4 +1,4 @@
-# Hosting (Path 1) and packaging: users only click "Sign in with Google"
+# Hosting (Path 1) and packaging: users only click "Continue with Google"
 
 Gmail access always needs a Google OAuth client, and someone has to create it once. This guide is for that someone: a maintainer shipping a build, or an operator running a server. End users never see any of it.
 

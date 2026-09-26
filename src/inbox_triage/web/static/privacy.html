@@ -4,10 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy Policy · Inbox Triage</title>
+  <meta name="color-scheme" content="light dark">
   <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' rx='7' fill='%231D1B17'/%3E%3Cpath d='M8 10h12' stroke='%23F4A06B' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M8 14.5h8' stroke='%238FB0FF' stroke-width='2.6' stroke-linecap='round'/%3E%3Cpath d='M8 19h4.5' stroke='%23C3A6FF' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
 </head>
-<body>
-  <header class="top"><a class="brand" href="/"><span class="logo" aria-hidden="true"></span>Inbox Triage</a></header>
+<body data-screen="page">
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="/">
+        <svg class="mark" width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="7"/><path d="M8 10h12" stroke="#F4A06B" stroke-width="2.6" stroke-linecap="round"/><path d="M8 14.5h8" stroke="#8FB0FF" stroke-width="2.6" stroke-linecap="round"/><path d="M8 19h4.5" stroke="#C3A6FF" stroke-width="2.6" stroke-linecap="round"/></svg>
+        <span>Inbox Triage</span>
+      </a>
+      <div class="top-right"><a class="navlink" href="/">Back to the app</a></div>
+    </div>
+  </header>
   <main class="view prose">
     <h1>Privacy Policy</h1>
     <p class="muted">Operated by {{OPERATOR}}. Contact: <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.</p>
@@ -32,7 +42,7 @@
         and coarse flags are sent to <b>Jev by TypeSafe</b> (typesafe.ai) using <b>your own Jev API key</b>. Jev
         answers yes/no questions; local rules decide the label. Message IDs, email addresses and attachments are not
         sent.</li>
-      <li>Only if you click “Turn my notes into rules”, your typed notes and the sender/subject of the emails shown on
+      <li>Only if you click “Turn notes into rules”, your typed notes and the sender/subject of the emails shown on
         screen are sent once to an AI model via OpenRouter to propose rules for you to review.</li>
       <li>We do not sell Google user data, use it for advertising, or use it to train AI models. Human access is
         limited to what's needed for security or legal obligations, or with your consent.</li>
@@ -58,5 +68,10 @@
     <h2>Changes</h2>
     <p>We'll update this page if data practices change. Last updated: 2026-09-24.</p>
   </main>
+  <footer class="foot">
+    <span>Label-only: Inbox Triage never sends, deletes, archives, or marks mail read.</span>
+    <span aria-hidden="true">·</span>
+    <a href="https://github.com/shimoverse/inbox-triage">Open source</a>
+  </footer>
 </body>
 </html>

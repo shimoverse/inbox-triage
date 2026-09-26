@@ -48,12 +48,12 @@ Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned 
 
 The hosted app is **free for the first 100 users** (beta). You bring your own Jev key; the code is MIT-licensed, so you can always self-host instead.
 
-1. Open the app and enter your email, then click **Sign in with Google** and approve the permission to manage Gmail labels.
+1. Open the app, click **Continue with Google** and approve the permission to manage Gmail labels.
 2. **Connect Jev.** Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
 3. **Tell it what matters.**
-   - Tap *Important* or *Not important* on a few recent emails.
+   - Tap *Important* or *Can wait* on a few recent emails.
    - Or type freely: *"#1 is my kids' school, always important. I don't care about real estate emails."* Prefer talking? Speak into Open Voice Flow or any voice-to-text app and paste the text.
-   - Click **Turn my notes into rules**, review the rules, and save.
+   - Click **Turn notes into rules**, review the rules, and save.
 4. **Pick a timeframe** (last day, 7, 30 or 90 days, optionally preview-only) **and a schedule** (hourly, daily, weekly, or the last day of each month).
 5. **Watch the dashboard:** last and next run, Jev decisions and speed, run history, recently labeled mail with links into Gmail, and your rules.
 
@@ -89,13 +89,13 @@ uv run inbox-triage --all --days 30                       # backfill 30 days for
 
 ## The optional notes assistant
 
-Jev decides; it doesn't write. Reading your typed notes and proposing rules is a language task, so it goes to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, which you can change with `INBOX_TRIAGE_ASSIST_MODEL`). It runs only when you click **Turn my notes into rules**, and you review every rule before it's saved. On the hosted app the operator provides it. When you run it yourself, add `OPENROUTER_API_KEY` or skip it and tag emails instead. It never classifies email.
+Jev decides; it doesn't write. Reading your typed notes and proposing rules is a language task, so it goes to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, which you can change with `INBOX_TRIAGE_ASSIST_MODEL`). It runs only when you click **Turn notes into rules**, and you review every rule before it's saved. On the hosted app the operator provides it. When you run it yourself, add `OPENROUTER_API_KEY` or skip it and tag emails instead. It never classifies email.
 
 ## How it behaves
 
 - **Your rules come first, within safety limits.**
   - *Important* senders, domains and topics get at least **For You**.
-  - *Not important* ones go to **Later**.
+  - *Can wait* ones go to **Later**.
   - Sender and domain rules only apply to authenticated (DMARC, or SPF plus DKIM) mail, so they can't be spoofed.
   - Suspected phishing is never promoted, and security alerts are never pushed to Later.
 - **Runs work in batches.** Scheduled runs continue from the last checkpoint. Batches are 100 messages, with at most 2,000 per run. Runs overlap by two days to catch delayed mail and skip anything already verified.
