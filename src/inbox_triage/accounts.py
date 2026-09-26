@@ -88,12 +88,14 @@ class Account:
         with os.fdopen(fd, "a", encoding="utf-8") as file:
             file.write(json.dumps(entry, separators=(",", ":"), sort_keys=True) + "\n")
 
-    def runs(self, limit: int = 50) -> list[dict]:
+    def runs(self, limit: int | None = 50) -> list[dict]:
+        """Newest first; ``limit=None`` returns them all."""
         path = self.dir / "runs.jsonl"
         if not path.exists():
             return []
         out = []
-        for line in path.read_text(encoding="utf-8").splitlines()[-limit:]:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line in lines[-limit:] if limit else lines:
             try:
                 out.append(json.loads(line))
             except json.JSONDecodeError:
@@ -112,21 +114,26 @@ class Account:
 
     def pending_resume(self) -> dict | None:
         """The latest run, if Gmail paused it and it will be picked up again automatically."""
-        runs = self.runs(MAX_RESUMES + 10)
+        runs = self.runs(None)
         if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at"):
             return None
         resumes = 0
-        for run in runs:  # clicking Run now while paused doesn't use up automatic retries
+        for run in runs:  # every pause since the last finished run; clicking Run now doesn't use up retries
             if run.get("status") != "paused":
                 break
             resumes += run.get("trigger") == "resume"
         return runs[0] if resumes < MAX_RESUMES else None
 
-    def resume_due(self, now: int | None = None) -> dict | None:
-        """The paused run to pick up again, once the break Gmail asked for is over."""
+    def due_run(self, now: int | None = None, tz: tzinfo | None = None) -> tuple[str, dict | None] | None:
+        """What the scheduler should start now: ("resume", paused run) once the break Gmail asked
+        for is over, ("schedule", None) when the schedule is due, or None. Nothing starts while a
+        break is pending, not even the schedule: the mailbox gets the rest Gmail asked for, and
+        the paused run (with its own window) carries on first."""
         now = int(now if now is not None else time.time())
         paused = self.pending_resume()
-        return paused if paused and int(paused["resume_at"]) <= now else None
+        if paused:
+            return ("resume", paused) if int(paused["resume_at"]) <= now else None
+        return ("schedule", None) if self.is_due(now, tz) else None
 
     def is_due(self, now: int | None = None, tz: tzinfo | None = None) -> bool:
         now = int(now if now is not None else time.time())

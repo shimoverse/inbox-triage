@@ -451,14 +451,56 @@ def test_paused_run_resumes_itself_after_gmails_break(app):
 
 def test_auto_resume_gives_up_after_a_few_tries_but_clicks_dont_count(tmp_path):
     acct = Account(tmp_path, EMAIL)
-    for i in range(accounts.MAX_RESUMES + 3):
-        acct.record_run({"started": i, "trigger": "manual", "status": "paused", "resume_at": 10})
-    assert acct.resume_due(now=11)                       # clicking Run now while paused never uses up retries
-    for i in range(accounts.MAX_RESUMES):
-        acct.record_run({"started": 100 + i, "trigger": "resume", "status": "paused", "resume_at": 10})
-    assert acct.pending_resume() is None and acct.resume_due(now=11) is None
-    acct.record_run({"started": 200, "trigger": "schedule", "status": "ok"})
+    acct.record_run({"started": 0, "trigger": "manual", "status": "paused", "resume_at": 10})
+    for i in range(accounts.MAX_RESUMES - 1):
+        acct.record_run({"started": 1 + i, "trigger": "resume", "status": "paused", "resume_at": 10})
+    for i in range(20):  # clicking Run now while paused never uses up retries...
+        acct.record_run({"started": 100 + i, "trigger": "manual", "status": "paused", "resume_at": 10})
+    assert acct.due_run(now=11)[0] == "resume"
+    acct.record_run({"started": 200, "trigger": "resume", "status": "paused", "resume_at": 10})
+    for i in range(20):  # ...and can't push earlier automatic attempts out of the count either
+        acct.record_run({"started": 300 + i, "trigger": "manual", "status": "paused", "resume_at": 10})
+    assert acct.pending_resume() is None and acct.due_run(now=11) is None
+    acct.record_run({"started": 400, "trigger": "schedule", "status": "ok"})
     assert acct.pending_resume() is None
+
+
+def test_schedule_waits_for_gmails_break_then_the_paused_run_goes_first(app):
+    # A 30-day rescan paused at 1_000 until 90_000; the hourly schedule comes due meanwhile.
+    acct = Account(app.state_dir, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=500)
+    acct.record_run({"started": 1_000, "trigger": "manual", "status": "paused", "resume_at": 90_000, "days": 30,
+                     "mode": "label-only"})
+    assert acct.is_due(20_000) and acct.due_run(20_000) is None
+    assert app.scheduler_tick(now=20_000) == []            # Gmail isn't contacted during its break
+    assert app.scheduler_tick(now=90_001) == [EMAIL]
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        import time; time.sleep(.01)
+    _, kw = app.fake_runs[-1]
+    assert kw["trigger"] == "resume" and kw["days"] == 30   # the rescan's window is kept
+
+
+def test_cli_due_mode_honours_a_pending_pause(tmp_path, monkeypatch, capsys):
+    from inbox_triage import runner
+    cfg, state = tmp_path / "cfg", tmp_path / "state"
+    (cfg / "tokens").mkdir(parents=True)
+    (cfg / "tokens" / f"{EMAIL}.json").write_text("{}")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-only")
+    calls = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: calls.append(k) or {"processed": 0, "remaining": False})
+    acct = Account(state, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    import time
+    acct.record_run({"started": 1, "trigger": "manual", "status": "paused", "resume_at": int(time.time()) + 900,
+                     "days": 14, "mode": "label-only"})
+    args = ["--all", "--due", "--config-dir", str(cfg), "--state-dir", str(state)]
+    assert runner.main(args) == 0 and calls == []           # due by the clock, but Gmail asked for a break
+    acct.record_run({"started": 2, "trigger": "manual", "status": "paused", "resume_at": 5, "days": 14,
+                     "mode": "label-only"})
+    assert runner.main(args) == 0
+    assert calls and calls[0]["since_days"] == 14 and acct.runs(1)[0]["trigger"] == "resume"
 
 
 def test_paused_job_status_and_throttled_dashboard_reads(app, monkeypatch):
@@ -509,4 +551,4 @@ def test_run_account_records_a_pause_with_its_progress(tmp_path, monkeypatch):
     assert entry["status"] == "paused" and entry["resume_at"] == 5_000 and entry["reason"] == "userRateLimitExceeded"
     assert entry["processed"] == 112 and entry["gmail_changes"] == 89
     acct = Account(tmp_path, EMAIL)
-    assert acct.resume_due(now=4_999) is None and acct.resume_due(now=5_000)["resume_at"] == 5_000
+    assert acct.due_run(now=4_999) is None and acct.due_run(now=5_000) == ("resume", acct.runs(1)[0])

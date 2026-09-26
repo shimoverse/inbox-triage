@@ -482,15 +482,15 @@ class App:
     def scheduler_tick(self, now: int | None = None) -> list[str]:
         started = []
         for email in discover_accounts(self.config_dir):
-            acct = Account(self.state_dir, email)
             try:
-                if acct.is_due(now):
-                    self.start_job(email, None, False, "schedule")
-                elif paused := acct.resume_due(now):
-                    # Gmail paused the last run; its break is over, so carry on where it stopped.
-                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", "resume")
-                else:
+                due = Account(self.state_dir, email).due_run(now)
+                if not due:
                     continue
+                trigger, paused = due
+                if paused:  # Gmail's break is over: carry on where the paused run stopped, with its window
+                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger)
+                else:
+                    self.start_job(email, None, False, trigger)
                 started.append(email)
             except HTTPError:
                 continue  # already running, or Jev isn't connected

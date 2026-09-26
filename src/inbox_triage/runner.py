@@ -364,13 +364,12 @@ def main(argv=None) -> int:
             settings = acct.settings()
             trigger, days, dry_run = "cli", args.days, args.dry_run
             if args.due:
-                if acct.is_due():
-                    trigger = "schedule"
-                elif paused := acct.resume_due():
-                    # A run Gmail paused picks up again once the break it asked for is over.
-                    trigger, days, dry_run = "resume", paused.get("days"), paused.get("mode") == "dry-run"
-                else:
-                    continue
+                due = acct.due_run()
+                if not due:
+                    continue  # not due, or Gmail asked for a break that isn't over yet
+                trigger, paused = due
+                if paused:  # carry on where the paused run stopped, with its window
+                    days, dry_run = paused.get("days"), paused.get("mode") == "dry-run"
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
             model, api_key = jev_settings(settings, args.model, args.config_dir, acct.jev_key())
