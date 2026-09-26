@@ -101,6 +101,7 @@ Jev decides; it doesn't write. Reading your typed notes and proposing rules is a
   - Suspected phishing is never promoted, and security alerts are never pushed to Later or Junk.
 - **Runs work in batches.** Scheduled runs continue from the last checkpoint. Batches are 100 messages, with at most 2,000 per run. Runs overlap by two days to catch delayed mail and skip anything already verified.
 - **Context comes from your mailbox.** People you've emailed, threads you joined, and authenticated receipts count. Only account-scoped hashes of these facts are stored, updated through the Gmail History API, and rebuilt automatically if that history expires.
+- **Gmail rate limits pause, never fail.** Requests to one mailbox share a budget: at most 4 at once, starting at 10 a second, halving whenever Gmail pushes back. If Gmail asks for a longer break, the run stops, keeps everything done so far, shows *Paused* with the time it carries on, and resumes on its own when the break is over (up to 6 times; the web app's scheduler or `inbox-triage --all --due` does this).
 - **Jev failures are contained.** Jev calls retry on 429 and 529 ("overloaded"). A message that repeatedly gets an unusable answer is left unchanged after three tries. If Jev fails repeatedly in a row, the run stops without advancing.
 - **Google Workspace admins** can triage many mailboxes with a service account and domain-wide delegation: `uv sync --extra workspace`, then `inbox-triage --service-account key.json --account a@corp.example --account b@corp.example`.
 

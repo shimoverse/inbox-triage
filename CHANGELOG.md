@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.2
+
+- **Gmail rate limits pause a run instead of failing it.** When Gmail says "slow down", the run keeps everything it has done, shows *Paused* (not *Failed*) with the time it carries on, and picks up where it stopped on its own once Gmail's break is over. This follows the time Gmail asks for (`Retry after …`), or waits 15 minutes when Gmail doesn't say. It resumes automatically up to 6 times; clicking Run now never uses those up.
+- **Gentler on Gmail.** Gmail limits each mailbox, whichever app is asking, so:
+  - A run and the dashboard reading the same mailbox now share one budget: at most 4 requests at a time.
+  - The pace starts at 10 requests a second and halves whenever Gmail pushes back. It creeps back up to 20 while requests succeed.
+  - A long "retry after" stops at once. The reads still queued are dropped rather than sent into a wall.
+  - Checking and labeling an email now takes 2–3 Gmail requests instead of 3–4, because Gmail's answer to a label change is used as the read-back.
+  - The dashboard reuses sender and subject details for 10 minutes (in memory only), so reopening it doesn't spend quota a run needs.
+- **The first run's context scan resumes.** Learning who you write to and what you've bought (up to 500 messages) is saved in chunks, so a throttled first run doesn't start the scan over.
+- **Clearer problems.**
+  - Failed and paused runs have a *Technical details* toggle with Google's exact message.
+  - A failed batch still counts the emails it checked and labeled.
+  - Server logs record Google's status and reason code (never mailbox content) and how often Gmail pushed back.
+  - If Gmail can't be reached for the recent-mail list, it says "Details unavailable right now" instead of claiming the email was deleted.
+
 ## 0.5.1
 
 - **First runs no longer fail with "Gmail API HTTP 403".** Gmail answers "slow down" with a 403, and a first run reads hundreds of messages in parallel to learn who you correspond with. Requests are now paced under Gmail's per-user limit (25 a second across all threads), and rate-limit 403s are retried with backoff (honouring `Retry-After`) instead of stopping the run.

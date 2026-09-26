@@ -431,3 +431,66 @@ def test_junk_rules_are_saved_and_the_assistant_may_propose_them(app):
     _, _, saved = call(app, "PUT", f"/api/accounts/{EMAIL}/preferences", rules, cookie)
     assert saved["rules"] == [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""}]
     assert "junk" in onboarding.SCHEMA["properties"]["rules"]["items"]["properties"]["action"]["enum"]
+
+
+def test_paused_run_resumes_itself_after_gmails_break(app):
+    acct = Account(app.state_dir, EMAIL)
+    acct.record_run({"started": 1_000, "trigger": "manual", "status": "paused", "resume_at": 2_000, "days": 7,
+                     "mode": "label-only", "processed": 40})
+    state = call(app, "GET", "/api/state", cookie=signed_in(app))[2]
+    assert state["accounts"][0]["resume_at"] == 2_000
+    assert app.scheduler_tick(now=1_500) == []          # not before the time Gmail gave
+    assert app.scheduler_tick(now=2_001) == [EMAIL]
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        import time; time.sleep(.01)
+    account, kw = app.fake_runs[-1]
+    assert kw["trigger"] == "resume" and kw["days"] == 7 and kw["runner_kwargs"]["dry_run"] is False
+
+
+def test_auto_resume_gives_up_after_a_few_tries_but_clicks_dont_count(tmp_path):
+    acct = Account(tmp_path, EMAIL)
+    for i in range(accounts.MAX_RESUMES + 3):
+        acct.record_run({"started": i, "trigger": "manual", "status": "paused", "resume_at": 10})
+    assert acct.resume_due(now=11)                       # clicking Run now while paused never uses up retries
+    for i in range(accounts.MAX_RESUMES):
+        acct.record_run({"started": 100 + i, "trigger": "resume", "status": "paused", "resume_at": 10})
+    assert acct.pending_resume() is None and acct.resume_due(now=11) is None
+    acct.record_run({"started": 200, "trigger": "schedule", "status": "ok"})
+    assert acct.pending_resume() is None
+
+
+def test_paused_job_status_and_throttled_dashboard_reads(app, monkeypatch):
+    from inbox_triage.gmail.client import RateLimited
+    import time
+    app.run_fn = lambda account, root, **kw: {"status": "paused", "resume_at": int(time.time()) + 600,
+                                              "reason": "userRateLimitExceeded", "processed": 3}
+    cookie = signed_in(app)
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, cookie)[0] == 200
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        time.sleep(.01)
+    assert app.jobs[EMAIL].status == "paused"
+    def throttled(email):
+        raise RateLimited(403, "User-rate limit exceeded.", "userRateLimitExceeded", retry_at=time.time() + 600)
+    monkeypatch.setattr(app, "client", throttled)
+    status, _, body = call(app, "GET", f"/api/accounts/{EMAIL}/emails", cookie=cookie)
+    assert status == 429 and "about 10 minutes" in body["error"]
+
+
+def test_dashboard_reuses_recent_message_details(app, monkeypatch):
+    fetches = []
+    class Client:
+        def get_many(self, ids, full=False):
+            fetches.append(list(ids))
+            return [{"id": i, "payload": {"headers": [{"name": "Subject", "value": "Hi " + i}]}} for i in ids]
+    monkeypatch.setattr(app, "client", lambda email: Client())
+    first, ok = app.decorate(EMAIL, [{"id": "m1"}, {"id": "m2"}])
+    assert ok and [d["subject"] for d in first] == ["Hi m1", "Hi m2"]
+    again, ok = app.decorate(EMAIL, [{"id": "m1"}, {"id": "m3"}])
+    assert fetches == [["m1", "m2"], ["m3"]] and again[0]["subject"] == "Hi m1"
+    monkeypatch.setattr(app, "client", lambda email: (_ for _ in ()).throw(RuntimeError("Gmail unreachable")))
+    missing, ok = app.decorate(EMAIL, [{"id": "m9"}])
+    assert not ok and "subject" not in missing[0]    # the page says "unavailable", not "deleted"

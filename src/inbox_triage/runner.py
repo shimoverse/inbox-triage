@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import preferences
 from .context import bootstrap_context, build_context, sync_incremental
-from .gmail.client import GmailClient, GmailError
+from .gmail.client import GmailClient, GmailError, RateLimited
 from .gmail.extract import extract_gmail_message
 from .policy import decide, junk_decision
 from .providers import ProviderError, make_provider
@@ -145,12 +145,15 @@ def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[
     owned = set(labels.values())
     target = {labels[name] for name in desired}
     add, remove = sorted(target - old), sorted((old & owned) - target)
-    if add or remove:
-        client.modify_labels(mid, add, remove)
-    actual = client.message_labels(mid)
+    if not add and not remove:
+        return False  # already right: nothing to write or read back
+    response = client.modify_labels(mid, add, remove)
+    # Gmail answers a change with the labels as they now are; read them again only if it didn't say.
+    after = response.get("labelIds") if isinstance(response, dict) else None
+    actual = set(after) if after is not None else client.message_labels(mid)
     if actual & owned != target or (old - owned) - actual:
         raise RuntimeError("Gmail label readback mismatch")
-    return bool(add or remove)
+    return True
 
 
 def desired_names(decision) -> set[str]:
@@ -194,26 +197,16 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                 service_account: Path | None = None, since_days: int | None = None,
                 api_key: str | None = None) -> dict:
     client = _client(token, account, service_account)
-    profile = client.profile()
-    if profile["emailAddress"].casefold() != account.casefold():
-        raise RuntimeError("Authenticated Gmail account mismatch")
-    state_path, journal = directory / "state.json", directory / "events.jsonl"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {
-        "account": account, "launch_epoch": now - 7 * 86400, "cursor_epoch": now - 7 * 86400}
-    if state["account"].casefold() != account.casefold():
-        raise RuntimeError("State belongs to a different account")
-    events = load_events(journal)
-    since = now - since_days * 86400 if since_days else None
-    ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
-    prefs = preferences.load(directory / "preferences.json")
-    junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
-    labels = None if dry_run else ensure_labels(client, *junk)
-    provider = make_provider(provider_name, model, api_key=api_key)
+    throttle = getattr(client, "throttle", None)
+    pushbacks = getattr(throttle, "pushbacks", 0)
     outcomes, seen, calls, changed, failures = Counter(), 0, 0, 0, 0
     tokens = Counter()
     consecutive = 0
     jev_seconds = 0.0
     complete = True
+    paused: RateLimited | None = None
+    events: dict[str, dict] = {}
+    journal = directory / "events.jsonl"
 
     def record(event: dict) -> None:
         event = {**event, "ts": now}
@@ -221,87 +214,119 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
             append_event(journal, event)
             events[event["id"]] = event
 
-    with TriageStore(directory / "context.db") as store:
-        if not store.get_cursor(account):
-            bootstrap_context(client, store, account, days=365, max_sent=250, max_purchases=250, now=now)
-        sync = sync_incremental(client, store, account, target_history_id=profile["historyId"],
-                                max_pages=10, page_size=500, now=now)
-        if sync.history_expired:
-            bootstrap_context(client, store, account, days=365, max_sent=250, max_purchases=250, now=now)
-            store.set_cursor(account, profile["historyId"])
-        for mid in ids:
-            previous = events.get(mid)
-            if previous and previous["status"] in {"verified", "skipped"}:
-                continue
-            if seen >= max_messages:
-                complete = False
-                break
-            seen += 1
-            if not previous or previous["status"] != "classified":
-                try:
-                    raw = client._get(mid, full=True)
-                except GmailError as exc:
-                    if exc.status != 404:
-                        raise
-                    outcomes["deleted"] += 1  # deleted since it was listed
+    def summary() -> dict:
+        return {"account": account, "mode": "dry-run" if dry_run else "label-only", "provider": provider_name,
+                "processed": seen, "outcomes": dict(sorted(outcomes.items())), "model_calls": calls,
+                "jev_calls": calls, "jev_ms": round(jev_seconds * 1000), "provider_failures": failures,
+                "tokens": dict(tokens), "frontier_calls": 0, "gmail_changes": changed,
+                "gmail_slowdowns": getattr(throttle, "pushbacks", 0) - pushbacks,
+                "remaining": not complete, "cursor_advanced": complete and not dry_run}
+
+    try:
+        profile = client.profile()
+        if profile["emailAddress"].casefold() != account.casefold():
+            raise RuntimeError("Authenticated Gmail account mismatch")
+        state_path = directory / "state.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {
+            "account": account, "launch_epoch": now - 7 * 86400, "cursor_epoch": now - 7 * 86400}
+        if state["account"].casefold() != account.casefold():
+            raise RuntimeError("State belongs to a different account")
+        events.update(load_events(journal))
+        since = now - since_days * 86400 if since_days else None
+        ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
+        prefs = preferences.load(directory / "preferences.json")
+        junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
+        labels = None if dry_run else ensure_labels(client, *junk)
+        provider = make_provider(provider_name, model, api_key=api_key)
+
+        with TriageStore(directory / "context.db") as store:
+            if not store.get_cursor(account):
+                bootstrap_context(client, store, account, days=365, max_sent=250, max_purchases=250, now=now)
+            sync = sync_incremental(client, store, account, target_history_id=profile["historyId"],
+                                    max_pages=10, page_size=500, now=now)
+            if sync.history_expired:
+                bootstrap_context(client, store, account, days=365, max_sent=250, max_purchases=250, now=now)
+                store.set_cursor(account, profile["historyId"])
+            for mid in ids:
+                previous = events.get(mid)
+                if previous and previous["status"] in {"verified", "skipped"}:
                     continue
-                evidence = extract_gmail_message(raw, lambda aid, m=mid: client.attachment_data(m, aid))
-                rule = preferences.match(prefs, evidence)
-                junked = junk_decision(evidence, rule)
-                if EXCLUDED.intersection(evidence.labels):
-                    proposed = {"id": mid, "status": "classified", "destination": "excluded", "names": []}
-                elif junked:
-                    # The person marked this as junk: label it without sending anything to Jev.
-                    proposed = {"id": mid, "status": "classified", "destination": junked.destination.value,
-                                "names": sorted(desired_names(junked))}
-                else:
-                    context = build_context(store, account, evidence, now=now,
-                                            priorities_path=directory / "priorities.json")
-                    if prefs.summary:
-                        context = dataclasses.replace(context, user_notes=prefs.summary)
+                if seen >= max_messages:
+                    complete = False
+                    break
+                seen += 1
+                if not previous or previous["status"] != "classified":
                     try:
-                        started = time.perf_counter()
-                        signals, usage = provider.classify_with_usage(evidence, context)
-                        jev_seconds += time.perf_counter() - started
-                    except ProviderError:
-                        # One malformed answer must not wedge the account: retry on later
-                        # runs, then give up and leave the message unchanged.
-                        failures += 1
-                        consecutive += 1
-                        attempts = int((previous or {}).get("attempts", 0)) + 1
-                        status = "skipped" if attempts >= MAX_ATTEMPTS else "failed"
-                        record({"id": mid, "status": status, "attempts": attempts, "destination": "error", "names": []})
-                        outcomes["error"] += 1
-                        if status == "failed":
-                            complete = False
-                        if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                        raw = client._get(mid, full=True)
+                    except GmailError as exc:
+                        if exc.status != 404:
                             raise
+                        outcomes["deleted"] += 1  # deleted since it was listed
                         continue
-                    consecutive = 0
-                    calls += 1
-                    tokens.update(usage)
-                    decision = decide(evidence, context, signals, preference=rule)
-                    proposed = {"id": mid, "status": "classified",
-                                "destination": decision.destination.value,
-                                "names": sorted(desired_names(decision))}
-                record(proposed)
-                previous = proposed
-            if not dry_run:
-                assert labels is not None
-                if JUNK_LABEL in previous["names"] and JUNK_LABEL not in labels:
-                    labels = ensure_labels(client, JUNK_LABEL)  # a junk decision from an earlier run
-                changed += int(apply_labels(client, mid, set(previous["names"]), labels))
-                record({**previous, "status": "verified"})
-            outcomes[previous["destination"]] += 1
+                    evidence = extract_gmail_message(raw, lambda aid, m=mid: client.attachment_data(m, aid))
+                    rule = preferences.match(prefs, evidence)
+                    junked = junk_decision(evidence, rule)
+                    if EXCLUDED.intersection(evidence.labels):
+                        proposed = {"id": mid, "status": "classified", "destination": "excluded", "names": []}
+                    elif junked:
+                        # The person marked this as junk: label it without sending anything to Jev.
+                        proposed = {"id": mid, "status": "classified", "destination": junked.destination.value,
+                                    "names": sorted(desired_names(junked))}
+                    else:
+                        context = build_context(store, account, evidence, now=now,
+                                                priorities_path=directory / "priorities.json")
+                        if prefs.summary:
+                            context = dataclasses.replace(context, user_notes=prefs.summary)
+                        try:
+                            started = time.perf_counter()
+                            signals, usage = provider.classify_with_usage(evidence, context)
+                            jev_seconds += time.perf_counter() - started
+                        except ProviderError:
+                            # One malformed answer must not wedge the account: retry on later
+                            # runs, then give up and leave the message unchanged.
+                            failures += 1
+                            consecutive += 1
+                            attempts = int((previous or {}).get("attempts", 0)) + 1
+                            status = "skipped" if attempts >= MAX_ATTEMPTS else "failed"
+                            record({"id": mid, "status": status, "attempts": attempts, "destination": "error", "names": []})
+                            outcomes["error"] += 1
+                            if status == "failed":
+                                complete = False
+                            if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                                raise
+                            continue
+                        consecutive = 0
+                        calls += 1
+                        tokens.update(usage)
+                        decision = decide(evidence, context, signals, preference=rule)
+                        proposed = {"id": mid, "status": "classified",
+                                    "destination": decision.destination.value,
+                                    "names": sorted(desired_names(decision))}
+                    record(proposed)
+                    previous = proposed
+                if not dry_run:
+                    assert labels is not None
+                    if JUNK_LABEL in previous["names"] and JUNK_LABEL not in labels:
+                        labels = ensure_labels(client, JUNK_LABEL)  # a junk decision from an earlier run
+                    changed += int(apply_labels(client, mid, set(previous["names"]), labels))
+                    record({**previous, "status": "verified"})
+                outcomes[previous["destination"]] += 1
+    except RateLimited as exc:
+        # Gmail asked for a break. Everything done so far is saved (the journal skips it next
+        # time), so stop here and let the caller come back when Gmail says.
+        complete, paused = False, exc
+    except Exception as exc:
+        exc.partial = summary()  # the run history still counts what this batch did before it stopped
+        raise
     if complete and not dry_run:
         state["cursor_epoch"] = max(now, int(state["cursor_epoch"])) if since_days else now
         save_state(state_path, state)
         compact_events(journal, events, now)
-    return {"account": account, "mode": "dry-run" if dry_run else "label-only", "provider": provider_name,
-            "processed": seen, "outcomes": dict(sorted(outcomes.items())), "model_calls": calls,
-            "jev_calls": calls, "jev_ms": round(jev_seconds * 1000), "provider_failures": failures,
-            "tokens": dict(tokens), "frontier_calls": 0, "gmail_changes": changed,
-            "remaining": not complete, "cursor_advanced": complete and not dry_run}
+    result = summary()
+    if paused:
+        result.update(paused_until=int(paused.retry_at), pause_code=paused.reason or str(paused.status),
+                      pause_reason=str(paused)[:300])
+    return result
 
 
 def main(argv=None) -> int:
@@ -335,16 +360,23 @@ def main(argv=None) -> int:
     for account in accounts:
         token = None if args.service_account else (args.token or default_token(account, args.config_dir))
         try:
-            settings = Account(args.state_dir, account).settings()
-            if args.due and not Account(args.state_dir, account).is_due():
-                continue
+            acct = Account(args.state_dir, account)
+            settings = acct.settings()
+            trigger, days, dry_run = "cli", args.days, args.dry_run
+            if args.due:
+                if acct.is_due():
+                    trigger = "schedule"
+                elif paused := acct.resume_due():
+                    # A run Gmail paused picks up again once the break it asked for is over.
+                    trigger, days, dry_run = "resume", paused.get("days"), paused.get("mode") == "dry-run"
+                else:
+                    continue
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
-            model, api_key = jev_settings(settings, args.model, args.config_dir,
-                                          Account(args.state_dir, account).jev_key())
-            result = run_account(account, args.state_dir, trigger="schedule" if args.due else "cli", days=args.days,
+            model, api_key = jev_settings(settings, args.model, args.config_dir, acct.jev_key())
+            result = run_account(account, args.state_dir, trigger=trigger, days=days,
                                  runner_kwargs={"token": token, "max_messages": args.max,
-                                                "dry_run": args.dry_run or bool(settings.get("dry_run")),
+                                                "dry_run": dry_run or bool(settings.get("dry_run")),
                                                 "model": model, "api_key": api_key,
                                                 "service_account": args.service_account})
             print(json.dumps(result, sort_keys=True))

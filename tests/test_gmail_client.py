@@ -28,9 +28,10 @@ class FakeHTTP:
         self.requests.append(req)
         for match, responses in self.routes:
             if match in req.full_url and responses:
-                status, body = responses.pop(0) if len(responses) > 1 else responses[0]
+                status, body, *headers = responses.pop(0) if len(responses) > 1 else responses[0]
                 if status >= 400:
-                    raise urllib.error.HTTPError(req.full_url, status, "err", {}, io.BytesIO(json.dumps(body).encode()))
+                    raise urllib.error.HTTPError(req.full_url, status, "err", headers[0] if headers else {},
+                                                 io.BytesIO(json.dumps(body).encode()))
                 return _Resp(body)
         raise AssertionError("unexpected request " + req.full_url)
 
@@ -109,9 +110,76 @@ def test_requests_are_paced_across_threads(tmp_path, monkeypatch):
     waits = []
     monkeypatch.setattr(gc.time, "sleep", waits.append)
     monkeypatch.setattr(gc.time, "monotonic", lambda: 100.0)  # a burst: every request asks at the same instant
+    monkeypatch.setattr(gc, "RATE_STEP", 0)
     http.route("/messages/", (200, {"id": "m"}))
     gc.GmailClient(token_file(tmp_path, expired=False)).get_many([f"m{i}" for i in range(5)])
-    assert sorted(round(w, 3) for w in waits) == [round(i / gc.MAX_REQUESTS_PER_SECOND, 3) for i in range(1, 5)]
+    assert sorted(round(w, 3) for w in waits) == [round(i / gc.START_RATE, 3) for i in range(1, 5)]
+
+
+def test_clients_for_one_mailbox_share_a_throttle(tmp_path):
+    # Gmail's limits are per mailbox: a run and the dashboard reading it must not add up past them.
+    token = token_file(tmp_path, expired=False)
+    other = tmp_path / "other"
+    other.mkdir()
+    assert gc.GmailClient(token).throttle is gc.GmailClient(token).throttle
+    assert gc.GmailClient(token).throttle is not gc.GmailClient(token_file(other, expired=False)).throttle
+
+
+LIMITED = {"error": {"code": 403, "errors": [{"reason": "userRateLimitExceeded", "domain": "usageLimits"}],
+                     "message": "User-rate limit exceeded.  Retry after {when}"}}
+
+
+def limited_until(seconds):
+    when = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() + seconds))
+    return {"error": {**LIMITED["error"], "message": LIMITED["error"]["message"].format(when=when)}}
+
+
+def test_long_retry_after_stops_at_once_and_holds_every_client(tmp_path, monkeypatch):
+    # Gmail asks for a 15-minute break: don't hammer it with retries, report when to come back.
+    http = FakeHTTP(monkeypatch)
+    http.route("/messages/", (403, limited_until(900)))
+    token = token_file(tmp_path, expired=False)
+    with pytest.raises(gc.RateLimited) as exc:
+        gc.GmailClient(token).get_many([f"m{i}" for i in range(40)])
+    assert 880 < exc.value.retry_at - time.time() <= 900
+    assert "userRateLimitExceeded" in str(exc.value) and "Retry after" in str(exc.value)
+    sent = len(http.requests)
+    assert sent <= gc.FETCH_WORKERS  # the reads still queued were dropped, not sent
+    with pytest.raises(gc.RateLimited):  # another client for the same mailbox waits too, without asking Gmail
+        gc.GmailClient(token).profile()
+    assert len(http.requests) == sent
+
+
+def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):
+    http = FakeHTTP(monkeypatch)
+    waits = []
+    monkeypatch.setattr(gc.time, "sleep", waits.append)
+    http.route("/profile", (429, {"error": {"code": 429, "message": "Too many concurrent requests for user"}},
+                            {"Retry-After": "7"}), (200, {"emailAddress": "a@example.org", "historyId": 1}))
+    client = gc.GmailClient(token_file(tmp_path, expired=False))
+    assert client.profile()["emailAddress"] == "a@example.org"
+    assert max(waits) > 6.9 and client.throttle.rate < gc.START_RATE and client.throttle.pushbacks == 1
+
+
+def test_endless_rate_limits_become_a_pause_not_a_crash(tmp_path, monkeypatch):
+    http = FakeHTTP(monkeypatch)
+    http.route("/labels", (403, {"error": {"code": 403, "message": "Rate Limit Exceeded",
+                                           "errors": [{"reason": "rateLimitExceeded"}]}}))
+    with pytest.raises(gc.RateLimited) as exc:
+        gc.GmailClient(token_file(tmp_path, expired=False)).labels()
+    assert len(http.requests) == gc.RETRIES + 1
+    assert abs(exc.value.retry_at - time.time() - gc.COOL_DOWN) < 5
+
+
+def test_retry_after_parsing():
+    class E:
+        def __init__(self, headers): self.headers = headers
+    assert gc._retry_after(E({"Retry-After": "12"})) == 12
+    assert 25 < gc._retry_after(E({}), limited_until(30)["error"]["message"]) <= 30
+    assert gc._retry_after(E({}), "Rate Limit Exceeded") == 0
+    assert gc._retry_after(E(None), "") == 0
+    assert gc._retry_after(E({"Retry-After": "inf"})) == 2 * 86400 and gc._retry_after(E({"Retry-After": "nan"})) == 0
+    assert gc._retry_after(E({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"})) == 0  # already past
 
 
 def test_get_many_is_parallel_safe_skips_404_and_keeps_order(tmp_path, monkeypatch):

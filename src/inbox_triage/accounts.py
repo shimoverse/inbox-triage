@@ -16,6 +16,7 @@ FREQUENCIES = ("off", "hourly", "daily", "weekly", "monthly")
 DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
                     "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0, "tz": ""}}
 MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
+MAX_RESUMES = 6  # automatic pick-ups of a run Gmail paused, before waiting for the schedule or a click
 
 
 def account_dir(root: Path, account: str) -> Path:
@@ -109,6 +110,24 @@ class Account:
         events.sort(key=lambda e: int(e.get("ts", 0)), reverse=True)
         return events[:limit]
 
+    def pending_resume(self) -> dict | None:
+        """The latest run, if Gmail paused it and it will be picked up again automatically."""
+        runs = self.runs(MAX_RESUMES + 10)
+        if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at"):
+            return None
+        resumes = 0
+        for run in runs:  # clicking Run now while paused doesn't use up automatic retries
+            if run.get("status") != "paused":
+                break
+            resumes += run.get("trigger") == "resume"
+        return runs[0] if resumes < MAX_RESUMES else None
+
+    def resume_due(self, now: int | None = None) -> dict | None:
+        """The paused run to pick up again, once the break Gmail asked for is over."""
+        now = int(now if now is not None else time.time())
+        paused = self.pending_resume()
+        return paused if paused and int(paused["resume_at"]) <= now else None
+
     def is_due(self, now: int | None = None, tz: tzinfo | None = None) -> bool:
         now = int(now if now is not None else time.time())
         sched = self.settings()["schedule"]
@@ -180,25 +199,38 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
 
 def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
                 runner_kwargs: dict | None = None, now: int | None = None) -> dict:
-    """Run triage in batches until the window is done (bounded), and record history."""
+    """Run triage in batches until the window is done (bounded), and record history.
+    A run Gmail throttles is recorded as paused (with when to resume), not as failed."""
     from . import runner
     started = int(now if now is not None else time.time())
     acct = Account(state_root, account)
-    totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0, "outcomes": {}}
+    totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0,
+                    "gmail_slowdowns": 0, "outcomes": {}}
     entry = {"started": started, "trigger": trigger, "days": days}
+
+    def add(result: dict) -> None:
+        for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures", "gmail_slowdowns"):
+            totals[key] += int(result.get(key) or 0)
+        for key, value in (result.get("outcomes") or {}).items():
+            totals["outcomes"][key] = totals["outcomes"].get(key, 0) + value
+        totals.update({k: result[k] for k in ("mode", "remaining") if k in result})
+
     try:
         for _ in range(MAX_BATCHES):
             result = runner.run(account, root=state_root, since_days=days, now=now, **(runner_kwargs or {}))
-            for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures"):
-                totals[key] += int(result.get(key, 0))
-            for key, value in result.get("outcomes", {}).items():
-                totals["outcomes"][key] = totals["outcomes"].get(key, 0) + value
-            totals.update({k: result[k] for k in ("mode", "remaining") if k in result})
+            add(result)
+            if result.get("paused_until"):
+                # Gmail asked for a break: keep what's done and pick the rest up when it says.
+                entry.update(resume_at=int(result["paused_until"]), reason=str(result.get("pause_code") or ""),
+                             message=str(result.get("pause_reason") or "")[:300])
+                break
             if not result.get("remaining") or result.get("mode") == "dry-run" or not result.get("processed"):
                 break
-        entry.update(status="ok", **totals)
+        entry.update(status="paused" if "resume_at" in entry else "ok", **totals)
     except Exception as exc:
-        entry.update(status="error", error=type(exc).__name__, message=str(exc)[:300], **totals)
+        add(getattr(exc, "partial", None) or {})  # what the interrupted batch did still counts
+        entry.update(status="error", error=type(exc).__name__, reason=str(getattr(exc, "reason", "") or ""),
+                     message=str(exc)[:300], **totals)
         raise
     finally:
         entry["finished"] = int(time.time()) if now is None else started

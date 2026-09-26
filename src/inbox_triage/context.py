@@ -13,6 +13,7 @@ from .models import ContextPack, MailEvidence
 from .store import TriageStore
 
 DAY = 86400
+BOOTSTRAP_CHUNK = 50  # messages learned (and saved) per step of the first context scan
 RELATIONSHIP_TTL = 400 * DAY
 THREAD_TTL = 180 * DAY
 PURCHASE_TTL = 400 * DAY
@@ -89,15 +90,22 @@ def learn_message(store: TriageStore, account: str, message: dict, now: int) -> 
 
 def bootstrap_context(client, store: TriageStore, account: str, *, days: int, max_sent: int,
                       max_purchases: int, now: int | None = None) -> ContextSyncStats:
+    """Learn from recent Sent mail and receipts. Progress is saved chunk by chunk, so a scan Gmail
+    interrupts picks up where it stopped instead of reading everything again."""
     now = int(now if now is not None else datetime.now(timezone.utc).timestamp())
-    sent = list(client.iter_metadata(f"in:sent newer_than:{days}d", max_sent))
-    purchases = list(client.iter_metadata(PURCHASE_QUERY.format(days=days), max_purchases))
-    for message in sent:
-        learn_message(store, account, message, now)
-    for message in purchases:
-        learn_message(store, account, message, now)
+    scanned = []
+    for query, limit in ((f"in:sent newer_than:{days}d", max_sent), (PURCHASE_QUERY.format(days=days), max_purchases)):
+        ids, count = store.bootstrap_pending(account, client.list_ids(query, limit)), 0
+        for start in range(0, len(ids), BOOTSTRAP_CHUNK):
+            chunk = ids[start:start + BOOTSTRAP_CHUNK]
+            for message in client.get_many(chunk, full=False):
+                learn_message(store, account, message, now)
+                count += 1
+            store.mark_bootstrapped(account, chunk)
+        scanned.append(count)
     store.prune_context(account, now)
-    return ContextSyncStats(sent_scanned=len(sent), purchase_scanned=len(purchases))
+    store.clear_bootstrap(account)
+    return ContextSyncStats(sent_scanned=scanned[0], purchase_scanned=scanned[1])
 
 
 def sync_incremental(client, store: TriageStore, account: str, *, target_history_id: str,

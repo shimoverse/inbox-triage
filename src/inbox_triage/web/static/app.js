@@ -200,7 +200,7 @@ const withZone = (sched) => ({ ...sched, tz: BROWSER_TZ || sched.tz || "" });
 // Gmail and Google errors as the person reading them needs them.
 function explainError(text) {
   const t = String(text || "unknown error");
-  if (/HTTP 403 \((rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED)\)/.test(t)) return "Gmail asked Inbox Triage to slow down. Nothing was lost: run it again and it picks up where it stopped.";
+  if (/HTTP 429\b|HTTP 403 \((rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED|RESOURCE_EXHAUSTED)\)/.test(t)) return "Gmail asked Inbox Triage to slow down. Nothing was lost: the next run picks up where this one stopped.";
   if (/HTTP 403 \((insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT)\)/.test(t)) return "Google didn't grant the Gmail permission. Sign out, sign in again, and tick the Gmail box.";
   if (/HTTP 403 \((accessNotConfigured|SERVICE_DISABLED)\)/.test(t)) return "The Gmail API is turned off for this server's Google Cloud project. Whoever runs the server needs to enable it.";
   if (/HTTP 403 \((dailyLimitExceeded|quotaExceeded)\)/.test(t)) return "This app reached Gmail's daily limit. It will work again tomorrow.";
@@ -208,6 +208,23 @@ function explainError(text) {
   if (/invalid_grant|HTTP 401/.test(t)) return "Google access has expired. Sign out and sign in again to reconnect.";
   return t;
 }
+
+// Google's own words, one click away, for whoever needs to look into a problem.
+function techDetails(raw, shown) {
+  const text = String(raw || "");
+  return text && text !== shown ? el("details", { class: "tech" }, el("summary", {}, "Technical details"), el("code", {}, text)) : null;
+}
+function problem(lead, raw) {
+  const text = explainError(raw);
+  return el("div", { class: "notice err wide" }, el("p", {}, lead, text), techDetails(raw, text));
+}
+// When a run Gmail paused carries on by itself.
+function resumeText(a) {
+  if (!a.resume_at) return "Click Run now to pick up where it stopped.";
+  return a.resume_at <= Date.now() / 1000 ? "It picks up where it stopped in a moment, on its own."
+    : `It picks up where it stopped ${upcoming(a.resume_at)}, on its own.`;
+}
+const TRIGGERS = { schedule: "Scheduled", resume: "Resumed" };
 
 // A row of role=radio buttons with arrow-key support (a real radio group, drawn as buttons).
 function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = "" }) {
@@ -827,6 +844,7 @@ function pollJob(a) {
         return pollJob(b);
       }
       if (b.job?.status === "ok") toast(`Sorting finished: ${plural(b.job.result.processed || 0, "email")} checked.`);
+      else if (b.job?.status === "paused") toast(`Gmail asked for a break. ${resumeText(b)}`);
       else if (b.job?.status === "error") toast("The run stopped. See the details on the dashboard.");
       if (current === b.email) render();
     } catch { pollJob(a); }
@@ -839,7 +857,7 @@ function overviewPane(a) {
     el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "loading" }, "Loading…"));
   const history = el("section", { class: "card clip", "aria-labelledby": "history-h" },
     el("div", { class: "card-head" }, el("h2", { id: "history-h" }, "Run history")), el("p", { class: "loading" }, "Loading…"));
-  const draw = (h) => { drawRecent(recent, h.decisions, a.email); drawHistory(history, h.runs); };
+  const draw = (h) => { drawRecent(recent, h.decisions, a.email, h.details !== false); drawHistory(history, h.runs); };
   if (historyCache[a.email]) draw(historyCache[a.email]);
   api(acctPath(a.email, "history")).then((h) => { historyCache[a.email] = h; if (recent.isConnected) draw(h); })
     .catch((err) => {
@@ -855,6 +873,8 @@ function statusText(a) {
   let kind, glyph, title, sub;
   if (!a.jev_connected) [kind, glyph, title, sub] = ["paused", "needs", "Sorting is paused", "Inbox Triage needs Jev to make decisions. Reconnect it to keep sorting."];
   else if (running) [kind, glyph, title, sub] = ["running", "sync", "Sorting now…", `Started ${ago(job.started)}. It keeps going if you leave this page.`];
+  else if (a.last_run?.status === "paused") [kind, glyph, title, sub] = ["paused", "later", "Sorting is taking a short break",
+    `Gmail asked for a slower pace. Nothing is lost. ${resumeText(a)}`];
   else if (a.settings.dry_run) [kind, glyph, title, sub] = ["preview", "eye", "Preview mode is on",
     `Runs show what would be labeled; Gmail isn't changed. ${s.frequency === "off" ? "No schedule." : `Runs ${scheduleText(s)}.`}`];
   else if (s.frequency === "off") [kind, glyph, title, sub] = ["manual", "hand", "Sorting runs when you ask", "No schedule is set. Click Run now, or pick one in Settings."];
@@ -884,7 +904,7 @@ function statusCard(a) {
     a.jev_connected ? el("div", { class: "runctl" }, days,
       a.settings.dry_run ? null : el("label", { class: "check", for: "dry" }, dry, el("span", {}, "Preview", el("span", { class: "d-only" }, " only"))), runBtn) : null,
     running ? el("div", { class: "progress wide", role: "progressbar", "aria-label": "Sorting in progress" }) : null,
-    failed ? el("p", { class: "notice err wide", title: job.result.message || job.result.error || null }, "Your last manual run didn't finish. ", explainError(job.result.message || job.result.error)) : null,
+    failed ? problem("Your last manual run didn't finish. ", job.result.message || job.result.error) : null,
     a.jev_connected ? null : el("div", { class: "wide" }, jevKeyForm(a, () => refresh())));
 }
 
@@ -916,15 +936,19 @@ function lastRunCard(a) {
   const done = preview ? labeled : (r.gmail_changes || 0);
   const main = el("div", { class: "main" },
     el("div", { class: "row between" }, el("h2", { id: "last-h" }, "Last run"),
-      el("span", { class: "small muted" }, [ago(r.started), r.trigger === "schedule" ? "scheduled" : "manual", preview ? "preview" : null].filter(Boolean).join(" · "))),
-    r.status === "ok" ? [
+      el("span", { class: "small muted" }, [ago(r.started), (TRIGGERS[r.trigger] || "Manual").toLowerCase(), preview ? "preview" : null].filter(Boolean).join(" · "))),
+    r.status === "ok" || (r.status === "paused" && r.processed) ? [
       el("p", { class: "big" }, el("b", {}, fmt(r.processed)), ` ${r.processed === 1 ? "email" : "emails"} checked, `, el("b", {}, fmt(done)),
         preview ? " would be labeled" : " labeled"),
       total ? outcomeBar(r.outcomes) : null,
       total ? el("ul", { class: "legend" }, parts.map(([name, cls, v]) => el("li", {}, el("span", { class: "sw " + cls }), name, " ", el("b", {}, fmt(v))))) : null,
       preview ? el("p", { class: "small muted" }, "Preview: Gmail wasn't changed.") : null,
-      r.remaining ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
-    ] : el("p", { class: "notice err", title: r.message || r.error || null }, "This run didn't finish. ", explainError(r.message || r.error)));
+      r.remaining && r.status === "ok" ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
+    ] : null,
+    r.status === "paused" ? el("div", { class: "notice warn" },
+      el("p", {}, el("b", {}, "Paused. "), `Gmail asked Inbox Triage to slow down, so this run stopped early. Nothing is lost. ${resumeText(a)}`),
+      techDetails(r.message)) : null,
+    r.status === "error" ? problem("This run didn't finish. ", r.message || r.error) : null);
   const side = el("div", { class: "side" },
     el("span", { class: "kv" }, icon("zap", 16), "Jev decisions"),
     el("span", { class: "bignum" }, r.jev_calls ? fmt(r.jev_calls) : "—"),
@@ -936,7 +960,7 @@ function gmailLink(email, id) {
   return `https://mail.google.com/mail/?authuser=${encodeURIComponent(email)}#all/${encodeURIComponent(id)}`;
 }
 
-function drawRecent(node, items, email) {
+function drawRecent(node, items, email, details = true) {
   const head = el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled"));
   if (!items.length) {
     return fill(node, head, el("p", { class: "empty" }, "Nothing labeled yet. After a run, labeled emails show up here with a link to open each one in Gmail."));
@@ -950,7 +974,7 @@ function drawRecent(node, items, email) {
     const shown = rows.filter((d) => filter === "all" || d.keys.includes(filter));
     fill(list, shown.map((d) => {
       const gone = d.from === undefined;
-      const subject = gone ? "No longer available in Gmail" : d.subject || "(no subject)";
+      const subject = gone ? (details ? "No longer available in Gmail" : "Details unavailable right now") : d.subject || "(no subject)";
       return el("li", { class: "mrow" },
         el("span", { class: "from", title: d.from || null }, gone ? "—" : senderName(d.from) || "—"),
         el("span", { class: "subj" + (gone ? " gone" : "") }, subject),
@@ -973,17 +997,19 @@ function drawRecent(node, items, email) {
 }
 
 function historyRow(r) {
-  const ok = r.status === "ok", preview = r.mode === "dry-run";
-  const trigger = r.trigger === "schedule" ? "Scheduled" : "Manual";
+  const ok = r.status === "ok", paused = r.status === "paused", preview = r.mode === "dry-run";
+  const trigger = TRIGGERS[r.trigger] || "Manual";
   const window = r.days ? `Last ${r.days} days · ` : "";
-  const summary = ok ? `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`
+  const counts = `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`;
+  const summary = ok ? counts : paused ? `${counts} · Gmail asked for a break`
     : `Didn't finish. ${explainError(r.message || r.error)}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
-    el("span", { class: "badge" + (r.trigger === "schedule" ? "" : " manual") }, trigger),
-    el("span", { class: "sum" + (ok ? "" : " err-text") }, el("span", { class: "m-only" }, trigger + " · "), summary),
-    (ok && outcomeBar(r.outcomes, true)) || el("span", { class: "bar-slot" }),
+    el("span", { class: "badge" + (r.trigger === "schedule" || r.trigger === "resume" ? "" : " manual") }, trigger),
+    el("span", { class: "sum" + (ok || paused ? "" : " err-text"), title: ok ? null : r.message || null }, el("span", { class: "m-only" }, trigger + " · "), summary),
+    ((ok || paused) && outcomeBar(r.outcomes, true)) || el("span", { class: "bar-slot" }),
     ok ? el("span", { class: "state ok" }, icon("check", 16), r.remaining ? "Done, more left" : "Done")
+      : paused ? el("span", { class: "state warn" }, icon("later", 16), "Paused")
       : el("span", { class: "state err" }, icon("needs", 16), "Failed"));
 }
 
