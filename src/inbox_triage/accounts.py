@@ -210,15 +210,17 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
 
 
 def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
-                runner_kwargs: dict | None = None, now: int | None = None) -> dict:
+                since: int | None = None, runner_kwargs: dict | None = None, now: int | None = None) -> dict:
     """Run triage in batches until the window is done (bounded), and record history.
-    A run Gmail throttles is recorded as paused (with when to resume), not as failed."""
+    A run Gmail throttles is recorded as paused (with when to resume), not as failed.
+    A rescan of ``days`` records where its window starts (``since``) so a resume covers the same mail."""
     from . import runner
     started = int(now if now is not None else time.time())
+    since = (int(since) if since else started - days * 86400) if days else None
     acct = Account(state_root, account)
     totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0,
                     "gmail_slowdowns": 0, "outcomes": {}}
-    entry = {"started": started, "trigger": trigger, "days": days}
+    entry = {"started": started, "trigger": trigger, "days": days, **({"since": since} if since else {})}
 
     def add(result: dict) -> None:
         for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures", "gmail_slowdowns"):
@@ -229,7 +231,7 @@ def run_account(account: str, state_root: Path, *, trigger: str = "manual", days
 
     try:
         for _ in range(MAX_BATCHES):
-            result = runner.run(account, root=state_root, since_days=days, now=now, **(runner_kwargs or {}))
+            result = runner.run(account, root=state_root, since_days=days, since=since, now=now, **(runner_kwargs or {}))
             add(result)
             if result.get("paused_until"):
                 # Gmail asked for a break: keep what's done and pick the rest up when it says.

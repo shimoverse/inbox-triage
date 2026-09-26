@@ -359,7 +359,11 @@ class App:
             except (TypeError, ValueError) as exc:
                 raise HTTPError(400, str(exc)) from None
         if (method, action) == ("POST", "run"):
-            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual")
+            last = acct.runs(1)
+            paused = last[0] if last and last[0].get("status") == "paused" else {}
+            # Running the same dates again right after a pause continues that rescan from where its window began.
+            since = paused.get("since") if paused.get("days") and str(paused["days"]) == str(body.get("days")) else None
+            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since)
         if (method, action) == ("GET", "job"):
             job = self.jobs.get(email)
             return job.__dict__ if job else {}
@@ -437,7 +441,7 @@ class App:
         return proposed.to_json()
 
     # ------------------------------------------------------------------ jobs
-    def start_job(self, email: str, days, dry_run: bool, trigger: str) -> dict:
+    def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None) -> dict:
         if days not in (None, ""):
             days = _int(days)
             if not 1 <= days <= MAX_WINDOW_DAYS:
@@ -454,16 +458,16 @@ class App:
             if current and current.status == "running":
                 raise HTTPError(409, "A run is already in progress")
             job = self.jobs[email] = Job(email, int(time.time()))
-        threading.Thread(target=self._run_job, args=(job, days, dry_run, trigger), daemon=True).start()
+        threading.Thread(target=self._run_job, args=(job, days, dry_run, trigger, since), daemon=True).start()
         return job.__dict__
 
-    def _run_job(self, job: Job, days, dry_run: bool, trigger: str) -> None:
+    def _run_job(self, job: Job, days, dry_run: bool, trigger: str, since: int | None = None) -> None:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
             model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key(),
                                              allow_machine_key=not self.hosted)
-            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, runner_kwargs={
+            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since, runner_kwargs={
                 "token": default_token(job.account, self.config_dir), "model": model,
                 "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "paused" if job.result.get("status") == "paused" else "ok"
@@ -488,7 +492,8 @@ class App:
                     continue
                 trigger, paused = due
                 if paused:  # Gmail's break is over: carry on where the paused run stopped, with its window
-                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger)
+                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger,
+                                   since=paused.get("since"))
                 else:
                     self.start_job(email, None, False, trigger)
                 started.append(email)

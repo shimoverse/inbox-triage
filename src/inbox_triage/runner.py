@@ -167,9 +167,11 @@ def desired_names(decision) -> set[str]:
 
 def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_messages: int = MAX_PER_RUN,
         dry_run: bool = False, now: int | None = None, provider: str = "jev", model: str | None = None,
-        service_account: Path | None = None, since_days: int | None = None, api_key: str | None = None) -> dict:
+        service_account: Path | None = None, since_days: int | None = None, api_key: str | None = None,
+        since: int | None = None) -> dict:
     """Triage one batch. ``since_days`` rescans that many past days (skipping verified mail)
-    instead of continuing from the checkpoint."""
+    instead of continuing from the checkpoint; ``since`` pins where that window starts (epoch
+    seconds), so every batch and resume of one rescan covers the same mail."""
     if not 1 <= max_messages <= MAX_PER_RUN:
         raise ValueError("max_messages must be between 1 and 100")
     if since_days is not None and not 1 <= since_days <= MAX_WINDOW_DAYS:
@@ -183,7 +185,7 @@ def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_
     os.chmod(directory, 0o700)
     with account_lock(directory / ".lock"):
         return _run_locked(account, token, directory, max_messages, dry_run, now, provider, model, service_account,
-                           since_days, api_key)
+                           since_days, api_key, since)
 
 
 def _client(token: Path | None, account: str, service_account: Path | None):
@@ -195,7 +197,7 @@ def _client(token: Path | None, account: str, service_account: Path | None):
 def _run_locked(account: str, token: Path | None, directory: Path, max_messages: int,
                 dry_run: bool, now: int, provider_name: str = "jev", model: str | None = None,
                 service_account: Path | None = None, since_days: int | None = None,
-                api_key: str | None = None) -> dict:
+                api_key: str | None = None, since: int | None = None) -> dict:
     client = _client(token, account, service_account)
     throttle = getattr(client, "throttle", None)
     pushbacks = getattr(throttle, "pushbacks", 0)
@@ -232,7 +234,8 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
         if state["account"].casefold() != account.casefold():
             raise RuntimeError("State belongs to a different account")
         events.update(load_events(journal))
-        since = now - since_days * 86400 if since_days else None
+        # A rescan's window starts where it first did, but never further back than any rescan may reach.
+        since = (max(since, now - MAX_WINDOW_DAYS * 86400) if since else now - since_days * 86400) if since_days else None
         ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
         prefs = preferences.load(directory / "preferences.json")
         junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
@@ -362,18 +365,18 @@ def main(argv=None) -> int:
         try:
             acct = Account(args.state_dir, account)
             settings = acct.settings()
-            trigger, days, dry_run = "cli", args.days, args.dry_run
+            trigger, days, since, dry_run = "cli", args.days, None, args.dry_run
             if args.due:
                 due = acct.due_run()
                 if not due:
                     continue  # not due, or Gmail asked for a break that isn't over yet
                 trigger, paused = due
                 if paused:  # carry on where the paused run stopped, with its window; --dry-run always wins
-                    days, dry_run = paused.get("days"), args.dry_run or paused.get("mode") == "dry-run"
+                    days, since, dry_run = paused.get("days"), paused.get("since"), args.dry_run or paused.get("mode") == "dry-run"
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
             model, api_key = jev_settings(settings, args.model, args.config_dir, acct.jev_key())
-            result = run_account(account, args.state_dir, trigger=trigger, days=days,
+            result = run_account(account, args.state_dir, trigger=trigger, days=days, since=since,
                                  runner_kwargs={"token": token, "max_messages": args.max,
                                                 "dry_run": dry_run or bool(settings.get("dry_run")),
                                                 "model": model, "api_key": api_key,
