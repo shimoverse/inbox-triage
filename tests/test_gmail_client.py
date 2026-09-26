@@ -234,6 +234,20 @@ def test_requests_held_by_a_pause_leave_it_one_at_a_time(monkeypatch):
     assert [round(w, 3) for w in waits[1::2]] == [2.0, 2.2, 2.4]  # then spaced at the slower pace, not a burst
 
 
+def test_a_break_asked_for_while_taking_a_turn_after_a_pause_is_honoured(monkeypatch):
+    throttle, waits = gc.Throttle(), []
+    def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:  # during its turn at the slower pace, another request is told to stay away
+            throttle.block(gc.RateLimited(403, "User-rate limit exceeded.", "userRateLimitExceeded",
+                                          retry_at=time.time() + 600))
+    monkeypatch.setattr(gc.time, "sleep", sleep)
+    monkeypatch.setattr(gc.time, "monotonic", lambda: 100.0)
+    throttle.pushed_back(2)
+    with pytest.raises(gc.RateLimited):
+        throttle.check()
+
+
 def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):
     http = FakeHTTP(monkeypatch)
     waits = []

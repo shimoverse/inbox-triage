@@ -112,19 +112,23 @@ class Throttle:
 
     def check(self) -> None:
         """Right before sending: honour a break, or a short pause, Gmail asked for while this request
-        waited its turn."""
-        waited_for = 0.0
+        waited its turn. Returns only straight after a look at the latest state, never after a sleep."""
+        waited_for, paced = 0.0, False
         while True:
             with self.lock:
                 self._check()
-                until = self.hold_until
-            hold = until - time.monotonic()
-            if hold <= 0 or until == waited_for:
-                break
-            time.sleep(hold)
-            waited_for = until  # look again: another request may have been told to wait longer meanwhile
-        if waited_for:
-            self.wait()  # out of a pause: take a fresh turn at the slower pace, so held requests don't all go at once
+                now, until = time.monotonic(), self.hold_until
+                if until > now and until != waited_for:
+                    # a pause (or a longer one than last time we looked): sit it out
+                    pause, waited_for, paced = until - now, until, False
+                elif waited_for and not paced:
+                    # out of a pause: take a fresh turn at the slower pace so held requests don't all go at once
+                    start = max(now, self.next_at)
+                    self.next_at = start + 1 / self.rate
+                    pause, paced = start - now, True
+                else:
+                    return
+            time.sleep(max(0.0, pause))
 
     def wait(self) -> None:
         with self.lock:
