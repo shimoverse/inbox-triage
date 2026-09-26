@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- **First runs no longer fail with "Gmail API HTTP 403".** Gmail answers "slow down" with a 403, and a first run reads hundreds of messages in parallel to learn who you correspond with. Requests are now paced under Gmail's per-user limit (25 a second across all threads), and rate-limit 403s are retried with backoff (honouring `Retry-After`) instead of stopping the run.
+- **Gmail errors say what went wrong.** Google's reason code and message are kept (for example `Gmail API HTTP 403 (ACCESS_TOKEN_SCOPE_INSUFFICIENT): …`), and the dashboard explains the common ones in plain words: rate limits, a missing Gmail permission, a disabled Gmail API, expired access.
+- **Schedules run in your time zone.** The hour you pick is saved with your browser's time zone and runs at that local time, not the server's clock. Before this, "Every day at 07:00" on a UTC server could show "next run tomorrow at 00:00" in California. Existing schedules adopt your time zone the next time you open the dashboard, and Settings shows which zone is used.
+
 ## 0.5.0
 
 - **Redesigned web app.** A calmer, friendlier look built around the labels themselves, with a matching dark mode.

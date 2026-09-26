@@ -7,13 +7,14 @@ import os
 import time
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import preferences as prefs_mod
 from .gmail.client import write_private
 
 FREQUENCIES = ("off", "hourly", "daily", "weekly", "monthly")
 DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
-                    "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0}}
+                    "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0, "tz": ""}}
 MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
 
 
@@ -53,6 +54,9 @@ class Account:
                 raise ValueError("Unknown schedule frequency")
             sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
             sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            # The IANA zone the person picked the hour in (from their browser); unknown zones fall back to server time.
+            name = str(sched.get("tz") or "")[:64]
+            sched["tz"] = name if schedule_zone({"tz": name}) else ""
             # Only slots after this moment count, so saving a schedule never fires a missed past slot.
             sched["anchor"] = int(now if now is not None else time.time())
             current["schedule"] = sched
@@ -108,7 +112,7 @@ class Account:
     def is_due(self, now: int | None = None, tz: tzinfo | None = None) -> bool:
         now = int(now if now is not None else time.time())
         sched = self.settings()["schedule"]
-        slot = latest_slot(sched, now, tz)
+        slot = latest_slot(sched, now, tz or schedule_zone(sched))
         return slot is not None and slot > max(int(sched.get("anchor", 0)), self.last_scheduled_run())
 
     def next_run(self, now: int | None = None, tz: tzinfo | None = None) -> int | None:
@@ -116,6 +120,7 @@ class Account:
         sched = self.settings()["schedule"]
         if sched["frequency"] == "off":
             return None
+        tz = tz or schedule_zone(sched)
         # Walk forward local hour by local hour (at most ~32 days) to the next slot.
         probe = _local(now, tz).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         for _ in range(24 * 32):
@@ -123,6 +128,15 @@ class Account:
             if latest_slot(sched, ts, tz) == ts:
                 return ts
             probe += timedelta(hours=1)
+        return None
+
+
+def schedule_zone(sched: dict) -> tzinfo | None:
+    """The zone a schedule's hours are in: the one it was set in, else None (the server's local time)."""
+    name = str(sched.get("tz") or "")
+    try:
+        return ZoneInfo(name) if name else None
+    except (ZoneInfoNotFoundError, ValueError):
         return None
 
 

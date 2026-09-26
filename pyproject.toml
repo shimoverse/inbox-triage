@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inbox-triage"
-version = "0.5.0"
+version = "0.5.1"
 description = "Private, label-only Gmail triage powered by Jev: typed decisions, local policy, Gmail labels"
 readme = "README.md"
 requires-python = ">=3.11"

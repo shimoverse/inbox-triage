@@ -185,6 +185,20 @@ function senderName(from) {
   return m ? (m[1].trim() || m[2]) : (from || "");
 }
 const acct = () => STATE.accounts.find((a) => a.email === current);
+// The zone schedule hours are picked in; the server runs the schedule in it.
+const BROWSER_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
+const withZone = (sched) => ({ ...sched, tz: BROWSER_TZ || sched.tz || "" });
+// Gmail and Google errors as the person reading them needs them.
+function explainError(text) {
+  const t = String(text || "unknown error");
+  if (/HTTP 403 \((rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED)\)/.test(t)) return "Gmail asked Inbox Triage to slow down. Nothing was lost: run it again and it picks up where it stopped.";
+  if (/HTTP 403 \((insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT)\)/.test(t)) return "Google didn't grant the Gmail permission. Sign out, sign in again, and tick the Gmail box.";
+  if (/HTTP 403 \((accessNotConfigured|SERVICE_DISABLED)\)/.test(t)) return "The Gmail API is turned off for this server's Google Cloud project. Whoever runs the server needs to enable it.";
+  if (/HTTP 403 \((dailyLimitExceeded|quotaExceeded)\)/.test(t)) return "This app reached Gmail's daily limit. It will work again tomorrow.";
+  if (/^Gmail API HTTP 403$/.test(t)) return "Gmail turned down a request (HTTP 403), most likely because the first run read mail too fast. Runs are now paced and retried: click Run now to try again.";
+  if (/invalid_grant|HTTP 401/.test(t)) return "Google access has expired. Sign out and sign in again to reconnect.";
+  return t;
+}
 
 // A row of role=radio buttons with arrow-key support (a real radio group, drawn as buttons).
 function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = "" }) {
@@ -733,7 +747,7 @@ function stepSchedule(a, st) {
   const finish = async (btn) => {
     btn.disabled = true;
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { schedule: st.schedule, onboarded: true });
+      await api(acctPath(a.email, "settings"), "PUT", { schedule: withZone(st.schedule), onboarded: true });
       await api(acctPath(a.email, "run"), "POST", { days: st.days, dry_run: st.preview });
       toast(st.preview ? "Preview started. Nothing in Gmail will change." : "Sorting started.");
       delete onboard[a.email];
@@ -756,7 +770,8 @@ function stepSchedule(a, st) {
     el("section", { class: "card pad stack", "aria-labelledby": "then-h" },
       el("h2", { id: "then-h" }, "Then keep it sorted"),
       scheduleFields(st.schedule, drawSummary),
-      el("p", { class: "help" }, "Runs happen while Inbox Triage is running on this computer or your server. Each run picks up where the last one stopped.")),
+      el("p", { class: "help" }, `Times are in your time zone${BROWSER_TZ ? ` (${BROWSER_TZ})` : ""}. ` +
+        "Runs happen while Inbox Triage is running on this computer or your server. Each run picks up where the last one stopped.")),
     summary,
     el("div", { class: "actions" },
       el("button", { class: "btn ghost", type: "button", onclick: () => goStep(st, 2) }, "Back"),
@@ -768,6 +783,21 @@ function stepSchedule(a, st) {
 function renderDashboard(a) {
   if (!["overview", "rules", "settings"].includes(tab)) tab = "overview";
   show("dashboard", tab === "rules" ? rulesPane(a) : tab === "settings" ? settingsPane(a) : overviewPane(a));
+  adoptTimeZone(a);
+}
+
+// Schedules saved before time zones were recorded ran on the server's clock, so "07:00" could mean
+// midnight here. The hour was picked in this browser, so record this browser's zone once.
+const zoneAdopted = new Set();
+async function adoptTimeZone(a) {
+  const s = a.settings.schedule;
+  if (s.tz || !BROWSER_TZ || s.frequency === "off" || zoneAdopted.has(a.email)) return;
+  zoneAdopted.add(a.email);
+  try {
+    await api(acctPath(a.email, "settings"), "PUT", { schedule: withZone(s) });
+    STATE = await api("state");
+    if (current === a.email && tab === "overview") render();
+  } catch { /* keep the server's clock; saving Settings records the zone later */ }
 }
 
 function pollJob(a) {
@@ -836,7 +866,7 @@ function statusCard(a) {
     a.jev_connected ? el("div", { class: "runctl" }, days,
       a.settings.dry_run ? null : el("label", { class: "check", for: "dry" }, dry, el("span", {}, "Preview", el("span", { class: "d-only" }, " only"))), runBtn) : null,
     running ? el("div", { class: "progress wide", role: "progressbar", "aria-label": "Sorting in progress" }) : null,
-    failed ? el("p", { class: "notice err wide" }, "Your last manual run didn't finish: ", job.result.message || job.result.error || "unknown error") : null,
+    failed ? el("p", { class: "notice err wide", title: job.result.message || job.result.error || null }, "Your last manual run didn't finish. ", explainError(job.result.message || job.result.error)) : null,
     a.jev_connected ? null : el("div", { class: "wide" }, jevKeyForm(a, () => refresh())));
 }
 
@@ -875,7 +905,7 @@ function lastRunCard(a) {
       total ? el("ul", { class: "legend" }, parts.map(([name, cls, v]) => el("li", {}, el("span", { class: "sw " + cls }), name, " ", el("b", {}, fmt(v))))) : null,
       preview ? el("p", { class: "small muted" }, "Preview: Gmail wasn't changed.") : null,
       r.remaining ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
-    ] : el("p", { class: "notice err" }, "This run didn't finish: ", r.message || r.error || "unknown error"));
+    ] : el("p", { class: "notice err", title: r.message || r.error || null }, "This run didn't finish. ", explainError(r.message || r.error)));
   const side = el("div", { class: "side" },
     el("span", { class: "kv" }, icon("zap", 16), "Jev decisions"),
     el("span", { class: "bignum" }, r.jev_calls ? fmt(r.jev_calls) : "—"),
@@ -928,7 +958,7 @@ function historyRow(r) {
   const trigger = r.trigger === "schedule" ? "Scheduled" : "Manual";
   const window = r.days ? `Last ${r.days} days · ` : "";
   const summary = ok ? `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`
-    : `Didn't finish: ${r.message || r.error || "unknown error"}`;
+    : `Didn't finish. ${explainError(r.message || r.error)}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
     el("span", { class: "badge" + (r.trigger === "schedule" ? "" : " manual") }, trigger),
@@ -1053,7 +1083,7 @@ function settingsPane(a) {
     e.preventDefault();
     saveBtn.disabled = true;
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { model: model.value.trim(), dry_run: preview.checked, schedule: sched });
+      await api(acctPath(a.email, "settings"), "PUT", { model: model.value.trim(), dry_run: preview.checked, schedule: withZone(sched) });
       STATE = await api("state");
       toast("Settings saved.");
     } catch (err) { toast(err.message); }
@@ -1084,7 +1114,8 @@ function settingsPane(a) {
   return el("div", { class: "wrap slim tabpane" },
     el("div", { class: "page-head" }, el("h1", { tabindex: "-1" }, "Settings")),
     el("form", { class: "card", onsubmit: save, "aria-label": "Settings" },
-      setrow("set-sched", "Schedule", "When new mail gets sorted.", scheduleFields(sched)),
+      setrow("set-sched", "Schedule", "When new mail gets sorted.", scheduleFields(sched),
+        el("p", { class: "help" }, `Times are in ${sched.tz || BROWSER_TZ || "the server's time zone"}.`)),
       setrow("set-preview", "Preview mode", "Try it without touching Gmail.",
         el("label", { class: "switch-row plain", for: "pm" }, preview, previewText)),
       setrow("set-jev", "Jev", "Makes every sorting decision.",

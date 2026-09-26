@@ -82,6 +82,38 @@ def test_non_retryable_error_raises_status(tmp_path, monkeypatch):
     assert exc.value.status == 403 and len(http.requests) == 1
 
 
+def test_rate_limit_403_backs_off_and_retries(tmp_path, monkeypatch):
+    # Gmail says "slow down" with a 403 and a rate-limit reason; that must be retried, not fatal.
+    http = FakeHTTP(monkeypatch)
+    limited = {"error": {"code": 403, "message": "User-rate limit exceeded.",
+                         "errors": [{"reason": "userRateLimitExceeded", "domain": "usageLimits"}]}}
+    http.route("/labels", (403, limited), (403, limited), (200, {"labels": [{"id": "L1", "name": "Triage/Later"}]}))
+    assert gc.GmailClient(token_file(tmp_path, expired=False)).labels() == [{"id": "L1", "name": "Triage/Later"}]
+    assert len(http.requests) == 3
+
+
+def test_other_403_keeps_googles_reason(tmp_path, monkeypatch):
+    http = FakeHTTP(monkeypatch)
+    http.route("/messages", (403, {"error": {"code": 403, "message": "Request had insufficient authentication scopes.",
+                                             "status": "PERMISSION_DENIED",
+                                             "details": [{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}))
+    with pytest.raises(gc.GmailError) as exc:
+        gc.GmailClient(token_file(tmp_path, expired=False)).list_ids("in:inbox", 5)
+    assert exc.value.reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT" and len(http.requests) == 1
+    assert str(exc.value) == ("Gmail API HTTP 403 (ACCESS_TOKEN_SCOPE_INSUFFICIENT): "
+                              "Request had insufficient authentication scopes.")
+
+
+def test_requests_are_paced_across_threads(tmp_path, monkeypatch):
+    http = FakeHTTP(monkeypatch)
+    waits = []
+    monkeypatch.setattr(gc.time, "sleep", waits.append)
+    monkeypatch.setattr(gc.time, "monotonic", lambda: 100.0)  # a burst: every request asks at the same instant
+    http.route("/messages/", (200, {"id": "m"}))
+    gc.GmailClient(token_file(tmp_path, expired=False)).get_many([f"m{i}" for i in range(5)])
+    assert sorted(round(w, 3) for w in waits) == [round(i / gc.MAX_REQUESTS_PER_SECOND, 3) for i in range(1, 5)]
+
+
 def test_get_many_is_parallel_safe_skips_404_and_keeps_order(tmp_path, monkeypatch):
     http = FakeHTTP(monkeypatch)
     http.route("/messages/gone", (404, {}))
