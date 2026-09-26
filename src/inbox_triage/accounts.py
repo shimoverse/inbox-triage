@@ -130,9 +130,12 @@ class Account:
         break is pending, not even the schedule: the mailbox gets the rest Gmail asked for, and
         the paused run (with its own window) carries on first."""
         now = int(now if now is not None else time.time())
+        latest = self.runs(1)
+        if latest and latest[0].get("status") == "paused" and int(latest[0].get("resume_at") or 0) > now:
+            return None  # even once automatic resumes are used up, the break still holds back the schedule
         paused = self.pending_resume()
         if paused:
-            return ("resume", paused) if int(paused["resume_at"]) <= now else None
+            return ("resume", paused)
         return ("schedule", None) if self.is_due(now, tz) else None
 
     def is_due(self, now: int | None = None, tz: tzinfo | None = None) -> bool:

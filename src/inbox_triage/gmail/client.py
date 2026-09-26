@@ -104,11 +104,18 @@ class Throttle:
         self.blocked_by = (429, "", "")
         self.pushbacks = 0
 
+    def _check(self) -> None:
+        if self.blocked_until > time.time():
+            # Gmail already asked for a break: don't knock again until it's over.
+            raise RateLimited(*self.blocked_by, retry_at=self.blocked_until)
+
+    def check(self) -> None:
+        with self.lock:
+            self._check()
+
     def wait(self) -> None:
         with self.lock:
-            if self.blocked_until > time.time():
-                # Gmail already asked for a break: don't knock again until it's over.
-                raise RateLimited(*self.blocked_by, retry_at=self.blocked_until)
+            self._check()
             now = time.monotonic()
             start = max(now, self.next_at)
             self.next_at = start + 1 / self.rate
@@ -308,8 +315,10 @@ class GmailClient:
                 headers["Content-Type"] = "application/json"
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
-                with self.throttle.slots, urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                    raw = response.read()
+                with self.throttle.slots:
+                    self.throttle.check()  # Gmail may have asked for a break while this request waited its turn
+                    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+                        raw = response.read()
                 self.throttle.succeeded()
                 return json.loads(raw) if raw else {}
             except urllib.error.HTTPError as exc:

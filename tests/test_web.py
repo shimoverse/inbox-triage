@@ -461,6 +461,11 @@ def test_auto_resume_gives_up_after_a_few_tries_but_clicks_dont_count(tmp_path):
     for i in range(20):  # ...and can't push earlier automatic attempts out of the count either
         acct.record_run({"started": 300 + i, "trigger": "manual", "status": "paused", "resume_at": 10})
     assert acct.pending_resume() is None and acct.due_run(now=11) is None
+    # Out of automatic resumes, but Gmail's latest break still holds back a due schedule until it ends.
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    acct.record_run({"started": 500, "trigger": "resume", "status": "paused", "resume_at": 20_000})
+    assert acct.pending_resume() is None and acct.is_due(10_800)
+    assert acct.due_run(now=10_800) is None and acct.due_run(now=20_000) == ("schedule", None)
     acct.record_run({"started": 400, "trigger": "schedule", "status": "ok"})
     assert acct.pending_resume() is None
 

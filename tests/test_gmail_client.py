@@ -150,6 +150,31 @@ def test_long_retry_after_stops_at_once_and_holds_every_client(tmp_path, monkeyp
     assert len(http.requests) == sent
 
 
+def test_a_request_waiting_its_turn_still_honours_a_new_break(tmp_path, monkeypatch):
+    # A dashboard read queued behind a run's reads must not go out once Gmail has asked for a break.
+    import threading
+    http = FakeHTTP(monkeypatch)
+    http.route("/profile", (200, {"emailAddress": "a@example.org", "historyId": 1}))
+    client = gc.GmailClient(token_file(tmp_path, expired=False))
+    for _ in range(gc.MAX_IN_FLIGHT):
+        client.throttle.slots.acquire()  # every slot busy
+    outcome = []
+    def read():
+        try:
+            outcome.append(client.profile())
+        except gc.RateLimited as exc:
+            outcome.append(exc)
+    reader = threading.Thread(target=read)
+    reader.start()
+    threading.Event().wait(0.1)  # the read has passed the pace check and is queued for a slot
+    client.throttle.block(gc.RateLimited(403, "User-rate limit exceeded.", "userRateLimitExceeded",
+                                         retry_at=time.time() + 600))
+    for _ in range(gc.MAX_IN_FLIGHT):
+        client.throttle.slots.release()
+    reader.join(5)
+    assert isinstance(outcome[0], gc.RateLimited) and http.requests == []
+
+
 def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):
     http = FakeHTTP(monkeypatch)
     waits = []
