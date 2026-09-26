@@ -30,6 +30,8 @@ let STATE = null;
 let current = null;           // selected account email
 let tab = "overview";         // dashboard tab: overview | rules | settings
 let focusNext = false;        // move focus to the new screen's heading after a user-initiated change
+let lastAccount = null;       // the account to return to when "Add another account" is cancelled
+const historyCache = {};      // last run history per account, drawn at once so re-renders don't jump
 const onboard = {};           // per-account wizard state
 let pollTimer = null;
 
@@ -96,6 +98,8 @@ function pill(key, big = false) {
   return el("span", { class: `pill ${meta.cls}${big ? " lg" : ""}` }, icon(LABEL_ICON[key], big ? 15 : 13), meta.name);
 }
 const labelKey = (gmailName) => Object.keys(LABELS).find((k) => LABELS[k].gmail.toLowerCase() === String(gmailName).toLowerCase());
+const LABEL_ORDER = Object.keys(LABELS);
+const byLabelOrder = (names) => [...names].sort((x, y) => (LABEL_ORDER.indexOf(labelKey(x)) + 1 || 99) - (LABEL_ORDER.indexOf(labelKey(y)) + 1 || 99));
 function pillForName(name) {
   const key = labelKey(name);
   return key ? pill(key) : el("span", { class: "pill" }, String(name).replace(/^(Triage|Topics)\//, ""));
@@ -108,14 +112,7 @@ function show(screen, node) {
   document.title = TITLES[screen] || "Inbox Triage";
   renderHeader(screen);
   const view = $view();
-  if (screen === "dashboard") {
-    view.setAttribute("role", "tabpanel");
-    view.setAttribute("aria-labelledby", "tab-" + tab);
-  } else {
-    view.removeAttribute("role");
-    view.removeAttribute("aria-labelledby");
-  }
-  mount(node);
+  mount(screen === "dashboard" ? el("div", { role: "tabpanel", id: "panel", "aria-labelledby": "tab-" + tab }, node) : node);
   if (focusNext) {
     focusNext = false;
     window.scrollTo(0, 0);
@@ -145,7 +142,7 @@ const fmt = (n) => Number(n || 0).toLocaleString();
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const hourText = (h) => `${String(h).padStart(2, "0")}:00`;
-const time = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const time = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 function dayDiff(d) {
   const a = new Date(d); a.setHours(0, 0, 0, 0);
   const b = new Date(); b.setHours(0, 0, 0, 0);
@@ -202,9 +199,10 @@ function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = 
     b.addEventListener("click", () => { pick(i); onChange(options[i].value); });
     b.addEventListener("keydown", (e) => {
       const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
-      if (!step) return;
+      const edge = { Home: 0, End: buttons.length - 1 }[e.key];
+      if (!step && edge === undefined) return;
       e.preventDefault();
-      const j = (i + step + buttons.length) % buttons.length;
+      const j = edge ?? (i + step + buttons.length) % buttons.length;
       pick(j, true); onChange(options[j].value);
     });
   });
@@ -245,7 +243,7 @@ function betaBanner() {
   if (!b || !b.enabled) return fill(slot);
   const until = b.ends ? new Date(b.ends + "T00:00:00").toLocaleDateString(undefined, { dateStyle: "long" }) : null;
   const parts = [b.ended ? "The free beta has ended"
-    : b.max_accounts ? `Free for the first ${b.max_accounts} users` : "Free beta"];
+    : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "user" : `${b.max_accounts} users`}` : "Free beta"];
   if (until && !b.ended) parts[0] += ` until ${until}`;
   parts.push("Bring your own Jev key");
   fill(slot, parts.map((p) => el("span", {}, p + " ·")),
@@ -271,15 +269,16 @@ function renderTabs(visible) {
   const a = acct();
   const defs = [["overview", "Overview"], ["rules", "What matters", a.rules], ["settings", "Settings"]];
   const buttons = defs.map(([key, label, count]) => el("button", {
-    type: "button", role: "tab", class: "tab", id: "tab-" + key, "aria-controls": "view",
+    type: "button", role: "tab", class: "tab", id: "tab-" + key, "aria-controls": "panel",
     "aria-selected": String(tab === key), tabindex: tab === key ? "0" : "-1",
     onclick: () => selectTab(key) },
     label, count ? el("span", { class: "count" }, String(count)) : null));
   buttons.forEach((b, i) => b.addEventListener("keydown", (e) => {
     const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
-    if (!step) return;
+    const edge = { Home: 0, End: defs.length - 1 }[e.key];
+    if (!step && edge === undefined) return;
     e.preventDefault();
-    selectTab(defs[(i + step + defs.length) % defs.length][0]);
+    selectTab(defs[edge ?? (i + step + defs.length) % defs.length][0]);
   }));
   fill(nav, buttons);
 }
@@ -301,7 +300,7 @@ function accountMenu() {
         el("span", { class: "avatar", "aria-hidden": "true" }, x.email.charAt(0)), el("span", { class: "email" }, x.email),
         x.email === current ? icon("check", 16) : null)),
       el("hr"),
-      el("button", { type: "button", onclick: () => navigate(() => { current = null; render(); }) }, icon("plus", 16), "Add another account"),
+      el("button", { type: "button", onclick: () => navigate(() => { lastAccount = current; current = null; render(); }) }, icon("plus", 16), "Add another account"),
       el("button", { type: "button", onclick: logout }, "Sign out")));
   menu.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && menu.open) { menu.open = false; menu.querySelector("summary").focus(); }
@@ -329,7 +328,8 @@ function renderSignin(prefill = "", note = "") {
   // Adding another account, or reconnecting one: a short card instead of the full welcome page.
   const email = el("input", { type: "email", id: "signin-email", value: prefill, placeholder: "you@gmail.com", autocomplete: "email" });
   const go = (e) => { e.preventDefault(); startGoogle(email.value, e.submitter); };
-  const back = STATE.accounts.find((x) => x.email !== prefill && x.connected);
+  const back = STATE.accounts.find((x) => x.email === lastAccount && x.email !== prefill && x.connected)
+    || STATE.accounts.find((x) => x.email !== prefill && x.connected);
   show("signin", el("div", { class: "wrap tiny" },
     el("form", { class: "card pad stack", onsubmit: go },
       el("div", { class: "page-head" },
@@ -513,15 +513,21 @@ function stepJev(a, st) {
           .map((t) => el("li", {}, icon("x", 18, "no"), t))))));
 }
 
+const ruleKey = (r) => `${r.kind}:${String(r.value).trim().toLowerCase().replace(/^@/, "")}`;
+function withoutDuplicates(rules) {
+  const byKey = new Map();
+  for (const r of rules) { byKey.delete(ruleKey(r)); byKey.set(ruleKey(r), r); }
+  return [...byKey.values()];
+}
 function ruleForEmail(m, action) {
   const personal = FREEMAIL.has(m.domain);
   return personal ? { kind: "sender", value: m.address, action, note: m.subject.slice(0, 80) }
                   : { kind: "domain", value: m.domain, action, note: m.subject.slice(0, 80) };
 }
 
-function ruleRow(r, onRemove, label) {
+function ruleRow(r, onRemove, label, showAction = true) {
   return el("div", { class: "rrow" },
-    r.action === "important" ? el("span", { class: "pill foryou" }, icon("foryou", 13), "Important")
+    !showAction ? null : r.action === "important" ? el("span", { class: "pill foryou" }, icon("foryou", 13), "Important")
       : el("span", { class: "pill later" }, icon("later", 13), "Can wait"),
     el("span", { class: "kind" }, RULE_KIND[r.kind] || r.kind),
     el("span", { class: "what" }, el("span", { class: "val" }, r.value), r.note ? el("span", { class: "note" }, r.note) : null),
@@ -543,16 +549,19 @@ function stepContext(a, st) {
     const m = st.emails.find((x) => x.id === id);
     return { ...ruleForEmail(m, action), _tag: id };
   });
-  const allRules = () => [...(st.proposed?.rules || []), ...(st.emails ? quickRules() : [])];
+  // Marking an email wins over a suggestion for the same sender or domain.
+  const allRules = () => withoutDuplicates([...(st.proposed?.rules || []), ...(st.emails ? quickRules() : [])]);
   const drawRules = () => {
     const rules = allRules();
     fill(rulesBox,
       el("div", { class: "row between" }, el("h2", {}, teach ? "New rules" : "Rules so far"),
         el("span", { class: "card-sub" }, rules.length ? plural(rules.length, "rule") : "")),
-      rules.length ? el("div", { class: "rlist" }, rules.map((r) => ruleRow(r, () => {
+      rules.length ? el("div", { class: "rlist" }, rules.map((r, i) => ruleRow(r, () => {
         if (r._tag) { st.tags[r._tag] = undefined; rowSync[r._tag]?.(); }
-        else st.proposed.rules.splice(st.proposed.rules.indexOf(r), 1);
+        else st.proposed.rules = st.proposed.rules.filter((x) => ruleKey(x) !== ruleKey(r));
         drawRules();
+        const left = rulesBox.querySelectorAll(".rrow .btn.icon");
+        (left[i] || left[i - 1] || saveBtn).focus();
       }))) : el("p", { class: "muted small" }, "Mark a few emails or write some notes, then turn them into rules."),
       st.proposed?.summary ? el("p", { class: "notice" }, el("b", {}, "What Jev keeps in mind: "), st.proposed.summary) : null);
     const n = rules.length;
@@ -563,13 +572,14 @@ function stepContext(a, st) {
   const drawList = () => {
     if (!st.emails) return;
     if (!st.emails.length) return fill(list, el("li", { class: "empty" }, "No recent inbox mail found. You can still describe what matters in your own words."));
-    fill(list, st.emails.map((m, i) => {
+    const shown = st.showAll ? st.emails : st.emails.slice(0, 8);
+    const rest = st.emails.length - shown.length;
+    fill(list, shown.map((m, i) => {
       const imp = el("button", { type: "button", class: "toggle important" });
       const wait = el("button", { type: "button", class: "toggle wait" });
       const li = el("li", {},
         el("div", { class: "meta" }, el("span", { class: "num" }, `#${i + 1}`), el("span", { class: "from" }, senderName(m.from) || m.address)),
         el("span", { class: "subj" }, m.subject || "(no subject)"),
-        m.snippet ? el("span", { class: "snip" }, m.snippet) : null,
         el("div", { class: "acts", role: "group", "aria-label": `#${i + 1}: ${m.subject || "(no subject)"}` }, imp, wait,
           el("button", { type: "button", class: "mention", onclick: () => insertRef(notes, st, i + 1, m) }, "Mention in notes")));
       const sync = rowSync[m.id] = () => {
@@ -585,7 +595,9 @@ function stepContext(a, st) {
       wait.addEventListener("click", () => mark("not_important"));
       sync();
       return li;
-    }));
+    }), rest > 0 ? el("li", { class: "more" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => {
+      st.showAll = true; drawList(); list.querySelectorAll("li")[shown.length]?.querySelector("button")?.focus();
+    } }, `Show ${plural(rest, "more email")}`)) : null);
   };
   if (!st.emails) {
     api(acctPath(a.email, "emails") + "?days=14").then((d) => { st.emails = d.emails; drawList(); drawRules(); })
@@ -607,6 +619,7 @@ function stepContext(a, st) {
   const assistantBox = el("div", { class: "stack" });
   const drawAssistant = () => {
     interpretBtn.disabled = !STATE.assistant.available;
+    assistantBox.hidden = STATE.assistant.available;
     if (STATE.assistant.available) return fill(assistantBox);
     fill(assistantBox, el("p", { class: "notice small" },
       "Turning notes into rules uses an optional assistant (", STATE.assistant.model, " via OpenRouter). ",
@@ -623,7 +636,7 @@ function stepContext(a, st) {
       if (!skip && rules.length) {
         const existing = await api(acctPath(a.email, "preferences"));
         const summary = [existing.summary, st.proposed?.summary].filter(Boolean).join(" ");
-        const saved = await api(acctPath(a.email, "preferences"), "PUT", { rules: [...existing.rules, ...rules], summary });
+        const saved = await api(acctPath(a.email, "preferences"), "PUT", { rules: withoutDuplicates([...existing.rules, ...rules]), summary });
         a.rules = saved.rules.length;
       }
       if (teach) {
@@ -689,8 +702,8 @@ function scheduleFields(sched, onChange) {
     WEEKDAYS.map((d, i) => el("option", { value: i, selected: i === sched.weekday }, d)));
   const extra = el("div", { class: "at" });
   const draw = () => fill(extra,
-    sched.frequency === "weekly" ? [el("label", { for: "sched-day" }, "on"), day] : null,
-    ["daily", "weekly", "monthly"].includes(sched.frequency) ? [el("label", { for: "sched-hour" }, "at"), hour] : null);
+    sched.frequency === "weekly" ? el("span", { class: "pair" }, el("label", { for: "sched-day" }, "on"), day) : null,
+    ["daily", "weekly", "monthly"].includes(sched.frequency) ? el("span", { class: "pair" }, el("label", { for: "sched-hour" }, "at"), hour) : null);
   const freq = radioGroup({ label: "How often", value: sched.frequency,
     options: STATE.frequencies.map((f) => ({ value: f, label: FREQ_LABEL[f] || f })),
     onChange: (f) => { sched.frequency = f; draw(); onChange?.(); } });
@@ -781,8 +794,14 @@ function overviewPane(a) {
     el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "loading" }, "Loading…"));
   const history = el("section", { class: "card clip", "aria-labelledby": "history-h" },
     el("div", { class: "card-head" }, el("h2", { id: "history-h" }, "Run history")), el("p", { class: "loading" }, "Loading…"));
-  api(acctPath(a.email, "history")).then((h) => { drawRecent(recent, h.decisions, a.email); drawHistory(history, h.runs); })
-    .catch((err) => { fill(recent, el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "empty err" }, err.message)); history.hidden = true; });
+  const draw = (h) => { drawRecent(recent, h.decisions, a.email); drawHistory(history, h.runs); };
+  if (historyCache[a.email]) draw(historyCache[a.email]);
+  api(acctPath(a.email, "history")).then((h) => { historyCache[a.email] = h; if (recent.isConnected) draw(h); })
+    .catch((err) => {
+      if (historyCache[a.email]) return;
+      fill(recent, el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "empty err" }, err.message));
+      history.hidden = true;
+    });
   return el("div", { class: "wrap" }, statusCard(a), lastRunCard(a), recent, history);
 }
 
@@ -813,9 +832,9 @@ function statusCard(a) {
       el("span", { class: "status-icon " + kind, "aria-hidden": "true" }, icon(glyph, 26)),
       el("div", {}, el("h1", { id: "status-h", tabindex: "-1" }, title), el("p", { id: running ? "run-started" : null }, sub))),
     a.jev_connected ? el("div", { class: "runctl" }, days,
-      a.settings.dry_run ? null : el("label", { class: "check", for: "dry" }, dry, "Preview only"), runBtn) : null,
+      a.settings.dry_run ? null : el("label", { class: "check", for: "dry" }, dry, el("span", {}, "Preview", el("span", { class: "d-only" }, " only"))), runBtn) : null,
     running ? el("div", { class: "progress wide", role: "progressbar", "aria-label": "Sorting in progress" }) : null,
-    failed ? el("p", { class: "notice err wide" }, "Your last manual run stopped: ", job.result.message || job.result.error || "unknown error") : null,
+    failed ? el("p", { class: "notice err wide" }, "Your last manual run didn't finish: ", job.result.message || job.result.error || "unknown error") : null,
     a.jev_connected ? null : el("div", { class: "wide" }, jevKeyForm(a, () => refresh())));
 }
 
@@ -854,7 +873,7 @@ function lastRunCard(a) {
       total ? el("ul", { class: "legend" }, parts.map(([name, cls, v]) => el("li", {}, el("span", { class: "sw " + cls }), name, " ", el("b", {}, fmt(v))))) : null,
       preview ? el("p", { class: "small muted" }, "Preview: Gmail wasn't changed.") : null,
       r.remaining ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
-    ] : el("p", { class: "notice err" }, "This run stopped: ", r.message || r.error || "unknown error"));
+    ] : el("p", { class: "notice err" }, "This run didn't finish: ", r.message || r.error || "unknown error"));
   const side = el("div", { class: "side" },
     el("span", { class: "kv" }, icon("zap", 16), "Jev decisions"),
     el("span", { class: "bignum" }, r.jev_calls ? fmt(r.jev_calls) : "—"),
@@ -884,7 +903,7 @@ function drawRecent(node, items, email) {
       return el("li", { class: "mrow" },
         el("span", { class: "from", title: d.from || null }, gone ? "—" : senderName(d.from) || "—"),
         el("span", { class: "subj" + (gone ? " gone" : "") }, subject),
-        el("span", { class: "pills" }, (d.names || []).length ? d.names.map(pillForName) : el("span", { class: "muted small" }, "Unchanged")),
+        el("span", { class: "pills" }, (d.names || []).length ? byLabelOrder(d.names).map(pillForName) : el("span", { class: "muted small" }, "Unchanged")),
         el("a", { class: "btn icon", href: gmailLink(email, d.id), target: "_blank", rel: "noopener", title: "Open in Gmail",
           "aria-label": gone ? "Open in Gmail" : `Open “${subject}” in Gmail` }, icon("external", 17)));
     }));
@@ -899,7 +918,7 @@ function drawRecent(node, items, email) {
   }));
   head.append(el("div", { class: "filters", role: "group", "aria-label": "Filter by label" }, chips));
   drawList();
-  fill(node, head, list, el("p", { class: "card-foot small muted" }, `The ${plural(items.length, "most recent label decision")}. Subjects are fetched live from Gmail and never stored.`));
+  fill(node, head, list);
 }
 
 function historyRow(r) {
@@ -907,14 +926,14 @@ function historyRow(r) {
   const trigger = r.trigger === "schedule" ? "Scheduled" : "Manual";
   const window = r.days ? `Last ${r.days} days · ` : "";
   const summary = ok ? `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`
-    : r.message || r.error || "Stopped";
+    : `Didn't finish: ${r.message || r.error || "unknown error"}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
     el("span", { class: "badge" + (r.trigger === "schedule" ? "" : " manual") }, trigger),
     el("span", { class: "sum" + (ok ? "" : " err-text") }, el("span", { class: "m-only" }, trigger + " · "), summary),
-    ok ? outcomeBar(r.outcomes, true) || el("span") : el("span"),
+    (ok && outcomeBar(r.outcomes, true)) || el("span", { class: "bar-slot" }),
     ok ? el("span", { class: "state ok" }, icon("check", 16), r.remaining ? "Done, more left" : "Done")
-      : el("span", { class: "state err" }, icon("needs", 16), "Stopped"));
+      : el("span", { class: "state err" }, icon("needs", 16), "Failed"));
 }
 
 function drawHistory(node, runs) {
@@ -961,7 +980,7 @@ function rulesPane(a) {
           act === "important" ? el("span", { class: "pill foryou lg" }, icon("foryou", 15), "Important")
             : el("span", { class: "pill later lg" }, icon("later", 15), "Can wait"),
           el("span", { class: "card-sub" }, sub))),
-        mine.length ? el("div", { class: "rlist" }, mine.map(([r, i]) => ruleRow(r, () => remove(i), `Remove rule ${r.value}`)))
+        mine.length ? el("div", { class: "rlist" }, mine.map(([r, i]) => ruleRow(r, () => remove(i), `Remove rule ${r.value}`, false)))
           : el("p", { class: "empty" }, act === "important" ? "No important senders or topics yet." : "Nothing marked as able to wait yet."));
     };
     const kind = el("select", { id: "rule-kind", "aria-label": "Match on", onchange: () => { kindValue = kind.value; value.placeholder = RULE_HINT[kind.value]; } },
@@ -973,16 +992,22 @@ function rulesPane(a) {
       fill(error); value.removeAttribute("aria-invalid");
       const v = value.value.trim();
       if (!v) { error.textContent = "Type a domain, an email address, or a word first."; value.setAttribute("aria-invalid", "true"); return value.focus(); }
-      const before = p.rules.length;
+      const rule = { kind: kind.value, value: v, action, note: "" };
+      const same = p.rules.find((r) => ruleKey(r) === ruleKey(rule));
+      if (same && same.action === action) {
+        error.textContent = `${v} is already in ${action === "important" ? "Important" : "Can wait"}.`;
+        return value.focus();
+      }
+      const others = p.rules.filter((r) => r !== same);
       try {
-        const saved = await put({ ...p, rules: [...p.rules, { kind: kind.value, value: v, action, note: "" }] });
-        if (saved.rules.length === before) {
+        const saved = await put({ ...p, rules: [...others, same ? { ...same, action } : rule] });
+        if (saved.rules.length === others.length) {
           error.textContent = kind.value === "domain" ? "That doesn't look like a domain. Try something like school.example."
             : kind.value === "sender" ? "That doesn't look like an email address." : "That rule doesn't look valid.";
           value.setAttribute("aria-invalid", "true");
           return value.focus();
         }
-        toast(`Added ${v}.`);
+        toast(same ? `Moved ${v} to ${action === "important" ? "Important" : "Can wait"}.` : `Added ${v}.`);
         draw(saved, "rule-value");
       } catch (err) { toast(err.message); }
     };
@@ -1003,7 +1028,7 @@ function rulesPane(a) {
   const load = () => api(acctPath(a.email, "preferences")).then((p) => draw(p))
     .catch((err) => fill(body, el("p", { class: "notice err" }, err.message)));
   load();
-  return el("div", { class: "wrap" },
+  return el("div", { class: "wrap tabpane" },
     el("div", { class: "page-head row-head" },
       el("div", { class: "page-head" }, el("h1", { tabindex: "-1" }, "What matters to you"),
         el("p", { class: "lead" }, "Your rules come first, within a few safety limits.")),
@@ -1041,7 +1066,7 @@ function settingsPane(a) {
       navigate(() => refresh());
     } catch (err) { toast(err.message); }
   };
-  const assistantBox = el("div", { class: "ctl" });
+  const assistantBox = el("div", { class: "ctl tight" });
   const drawAssistant = () => fill(assistantBox,
     el("span", { class: "val" }, el("b", {}, STATE.assistant.model), " via OpenRouter"),
     el("span", { class: "help" }, "Runs only when you click “Turn notes into rules”. It never classifies email."),
@@ -1054,8 +1079,8 @@ function settingsPane(a) {
   });
   const setrow = (id, title, sub, ...ctl) => el("div", { class: "setrow" },
     el("div", { class: "lbl" }, el("h2", { id }, title), el("p", {}, sub)), el("div", { class: "ctl" }, ...ctl));
-  return el("div", { class: "wrap slim" },
-    el("div", { class: "page-head" }, el("h1", { tabindex: "-1" }, "Settings"), el("p", { class: "lead" }, a.email)),
+  return el("div", { class: "wrap slim tabpane" },
+    el("div", { class: "page-head" }, el("h1", { tabindex: "-1" }, "Settings")),
     el("form", { class: "card", onsubmit: save, "aria-label": "Settings" },
       setrow("set-sched", "Schedule", "When new mail gets sorted.", scheduleFields(sched)),
       setrow("set-preview", "Preview mode", "Try it without touching Gmail.",
@@ -1071,10 +1096,12 @@ function settingsPane(a) {
     el("section", { class: "card danger", "aria-labelledby": "danger-h" },
       el("div", { class: "setrow" },
         el("div", { class: "lbl" }, el("h2", { id: "danger-h" }, "Disconnect"), el("p", {}, "Leave and delete your data.")),
-        el("div", { class: "ctl" },
+        el("div", { class: "ctl side" },
           el("p", {}, "Revokes Google access and permanently deletes your rules, settings, Jev key and history here. Labels already in Gmail stay."),
-          el("div", {}, el("button", { class: "btn danger", type: "button", onclick: disconnect }, icon("trash", 16), "Disconnect account"))))));
+          el("button", { class: "btn danger", type: "button", onclick: disconnect }, icon("trash", 16), "Disconnect account")))));
 }
 
-window.addEventListener("hashchange", () => refresh());
+window.addEventListener("hashchange", () => {
+  if (/(^|[#&])(account|error)=/.test(location.hash)) refresh();
+});
 refresh().catch((err) => mount(el("div", { class: "wrap tiny" }, el("p", { class: "notice err" }, err.message))));
