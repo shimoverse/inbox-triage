@@ -603,10 +603,13 @@ def test_runner_uses_the_pinned_window_but_never_beyond_the_limit(tmp_path, monk
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
     now = 50_000_000
+    ninety = now - 90 * 86400 - 7200  # a 90-day rescan resumed two hours after it started
     runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30, since=now - 31 * 86400)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=90, since=ninety)
     runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30, since=1)
     assert queries[0].startswith(f"after:{now - 31 * 86400} ")
-    assert queries[1].startswith(f"after:{now - runner.MAX_WINDOW_DAYS * 86400} ")
+    assert queries[1].startswith(f"after:{ninety} ")                           # kept, not slid forward
+    assert queries[2].startswith(f"after:{now - runner.JOURNAL_RETENTION} ")  # but no older than the journal
 
 
 def test_resumes_and_run_now_after_a_pause_keep_the_rescan_window(app):

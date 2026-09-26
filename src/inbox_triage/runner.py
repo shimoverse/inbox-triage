@@ -234,8 +234,9 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
         if state["account"].casefold() != account.casefold():
             raise RuntimeError("State belongs to a different account")
         events.update(load_events(journal))
-        # A rescan's window starts where it first did, but never further back than any rescan may reach.
-        since = (max(since, now - MAX_WINDOW_DAYS * 86400) if since else now - since_days * 86400) if since_days else None
+        # A rescan's window starts where it first did (even a 90-day one resumed later), but never further
+        # back than the journal remembers what was already done.
+        since = (max(since, now - JOURNAL_RETENTION) if since else now - since_days * 86400) if since_days else None
         ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
         prefs = preferences.load(directory / "preferences.json")
         junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
