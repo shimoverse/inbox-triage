@@ -830,7 +830,10 @@ async function adoptTimeZone(a) {
   } catch { /* keep the server's clock; saving Settings records the zone later */ }
 }
 
-function pollJob(a) {
+// While a run goes, or waits out a break Gmail asked for, keep the overview in step with the server,
+// so an automatic resume and its result show up without a reload.
+const resumeCheck = (a) => Math.min(60000, Math.max(5000, (a.resume_at - Date.now() / 1000) * 1000 + 3000));
+function pollJob(a, delay = 2500) {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
     try {
@@ -838,21 +841,28 @@ function pollJob(a) {
       const b = fresh.accounts.find((x) => x.email === a.email);
       STATE = fresh;
       if (!b) return render();
-      if (b.job?.status === "running") {
+      const watching = a.job?.status === "running" ? a.job.started : null;
+      if (b.job?.status === "running" && b.job.started === watching) {
         const line = document.getElementById("run-started");
         if (line) line.textContent = `Started ${ago(b.job.started)}. It keeps going if you leave this page.`;
         return pollJob(b);
       }
-      if (b.job?.status === "ok") toast(`Sorting finished: ${plural(b.job.result.processed || 0, "email")} checked.`);
-      else if (b.job?.status === "paused") toast(`Gmail asked for a break. ${resumeText(b)}`);
-      else if (b.job?.status === "error") toast("The run stopped. See the details on the dashboard.");
-      if (current === b.email) render();
-    } catch { pollJob(a); }
-  }, 2500);
+      // A run ended: the one on screen, or an automatic resume that started and finished between looks.
+      const ended = b.job && b.job.status !== "running" && (b.job.started === watching || b.job.started !== a.job?.started);
+      if (ended) {
+        if (b.job.status === "ok") toast(`Sorting finished: ${plural(b.job.result.processed || 0, "email")} checked.`);
+        else if (b.job.status === "paused") toast(`Gmail asked for a break. ${resumeText(b)}`);
+        else if (b.job.status === "error") toast("The run stopped. See the details on the dashboard.");
+      }
+      if (ended || b.job?.status === "running") return current === b.email && tab === "overview" ? render() : undefined;
+      if (b.resume_at) pollJob(b, resumeCheck(b));  // still paused: look again once the break is over
+    } catch { pollJob(a, delay); }
+  }, delay);
 }
 
 function overviewPane(a) {
   if (a.job?.status === "running") pollJob(a);
+  else if (a.resume_at) pollJob(a, resumeCheck(a));
   const recent = el("section", { class: "card clip", "aria-labelledby": "recent-h" },
     el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "loading" }, "Loading…"));
   const history = el("section", { class: "card clip", "aria-labelledby": "history-h" },

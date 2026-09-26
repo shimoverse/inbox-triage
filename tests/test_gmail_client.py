@@ -175,6 +175,25 @@ def test_a_request_waiting_its_turn_still_honours_a_new_break(tmp_path, monkeypa
     assert isinstance(outcome[0], gc.RateLimited) and http.requests == []
 
 
+def test_a_request_waiting_its_turn_still_honours_a_short_pause(tmp_path, monkeypatch):
+    import threading
+    http = FakeHTTP(monkeypatch)
+    waits = []
+    monkeypatch.setattr(gc.time, "sleep", waits.append)
+    http.route("/profile", (200, {"emailAddress": "a@example.org", "historyId": 1}))
+    client = gc.GmailClient(token_file(tmp_path, expired=False))
+    for _ in range(gc.MAX_IN_FLIGHT):
+        client.throttle.slots.acquire()
+    reader = threading.Thread(target=client.profile)
+    reader.start()
+    threading.Event().wait(0.1)  # queued for a slot
+    client.throttle.pushed_back(5)  # another request was told to slow down for 5 seconds
+    for _ in range(gc.MAX_IN_FLIGHT):
+        client.throttle.slots.release()
+    reader.join(5)
+    assert len(http.requests) == 1 and max(waits) > 4.5  # it waited out the pause before going
+
+
 def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):
     http = FakeHTTP(monkeypatch)
     waits = []

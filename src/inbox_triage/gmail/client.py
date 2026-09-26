@@ -100,6 +100,7 @@ class Throttle:
         self.slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         self.rate = START_RATE
         self.next_at = 0.0        # monotonic time the next request may start
+        self.hold_until = 0.0     # monotonic time a short pause Gmail asked for ends
         self.blocked_until = 0.0  # wall-clock time Gmail asked us to stay away until
         self.blocked_by = (429, "", "")
         self.pushbacks = 0
@@ -110,8 +111,15 @@ class Throttle:
             raise RateLimited(*self.blocked_by, retry_at=self.blocked_until)
 
     def check(self) -> None:
+        """Right before sending: honour a break, or a short pause, Gmail asked for while this request
+        waited its turn."""
         with self.lock:
             self._check()
+            hold = self.hold_until - time.monotonic()
+        if hold > 0:
+            time.sleep(hold)
+            with self.lock:
+                self._check()
 
     def wait(self) -> None:
         with self.lock:
@@ -131,7 +139,8 @@ class Throttle:
         with self.lock:
             self.pushbacks += 1
             self.rate = max(MIN_RATE, self.rate / 2)
-            self.next_at = max(self.next_at, time.monotonic() + pause)
+            self.hold_until = max(self.hold_until, time.monotonic() + pause)
+            self.next_at = max(self.next_at, self.hold_until)
 
     def block(self, error: RateLimited) -> None:
         with self.lock:
@@ -316,7 +325,7 @@ class GmailClient:
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
                 with self.throttle.slots:
-                    self.throttle.check()  # Gmail may have asked for a break while this request waited its turn
+                    self.throttle.check()
                     with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
                         raw = response.read()
                 self.throttle.succeeded()
