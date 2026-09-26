@@ -431,3 +431,207 @@ def test_junk_rules_are_saved_and_the_assistant_may_propose_them(app):
     _, _, saved = call(app, "PUT", f"/api/accounts/{EMAIL}/preferences", rules, cookie)
     assert saved["rules"] == [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""}]
     assert "junk" in onboarding.SCHEMA["properties"]["rules"]["items"]["properties"]["action"]["enum"]
+
+
+def test_paused_run_resumes_itself_after_gmails_break(app):
+    acct = Account(app.state_dir, EMAIL)
+    acct.record_run({"started": 1_000, "trigger": "manual", "status": "paused", "resume_at": 2_000, "days": 7,
+                     "mode": "label-only", "processed": 40})
+    state = call(app, "GET", "/api/state", cookie=signed_in(app))[2]
+    assert state["accounts"][0]["resume_at"] == 2_000
+    assert app.scheduler_tick(now=1_500) == []          # not before the time Gmail gave
+    assert app.scheduler_tick(now=2_001) == [EMAIL]
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        import time; time.sleep(.01)
+    account, kw = app.fake_runs[-1]
+    assert kw["trigger"] == "resume" and kw["days"] == 7 and kw["runner_kwargs"]["dry_run"] is False
+
+
+def test_auto_resume_gives_up_after_a_few_tries_but_clicks_dont_count(tmp_path):
+    acct = Account(tmp_path, EMAIL)
+    acct.record_run({"started": 0, "trigger": "manual", "status": "paused", "resume_at": 10})
+    for i in range(accounts.MAX_RESUMES - 1):
+        acct.record_run({"started": 1 + i, "trigger": "resume", "status": "paused", "resume_at": 10})
+    for i in range(20):  # clicking Run now while paused never uses up retries...
+        acct.record_run({"started": 100 + i, "trigger": "manual", "status": "paused", "resume_at": 10})
+    assert acct.due_run(now=11)[0] == "resume"
+    acct.record_run({"started": 200, "trigger": "resume", "status": "paused", "resume_at": 10})
+    for i in range(20):  # ...and can't push earlier automatic attempts out of the count either
+        acct.record_run({"started": 300 + i, "trigger": "manual", "status": "paused", "resume_at": 10})
+    assert acct.pending_resume() is None and acct.due_run(now=11) is None
+    # Out of automatic resumes, but Gmail's latest break still holds back a due schedule until it ends.
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    acct.record_run({"started": 500, "trigger": "resume", "status": "paused", "resume_at": 20_000})
+    assert acct.pending_resume() is None and acct.is_due(10_800)
+    assert acct.due_run(now=10_800) is None and acct.due_run(now=20_000) == ("schedule", None)
+    acct.record_run({"started": 400, "trigger": "schedule", "status": "ok"})
+    assert acct.pending_resume() is None
+
+
+def test_a_paused_preview_is_not_replayed_but_still_holds_the_schedule(tmp_path):
+    # A preview keeps no progress, so resuming it would repeat the same Jev calls from the start.
+    acct = Account(tmp_path, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    acct.record_run({"started": 100, "trigger": "manual", "status": "paused", "resume_at": 20_000, "mode": "dry-run"})
+    assert acct.pending_resume() is None
+    assert acct.is_due(10_800) and acct.due_run(10_800) is None      # Gmail's break still holds the schedule
+    assert acct.due_run(20_000) == ("schedule", None)                  # then the schedule runs, not a replay
+
+
+def test_schedule_waits_for_gmails_break_then_the_paused_run_goes_first(app):
+    # A 30-day rescan paused at 1_000 until 90_000; the hourly schedule comes due meanwhile.
+    acct = Account(app.state_dir, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=500)
+    acct.record_run({"started": 1_000, "trigger": "manual", "status": "paused", "resume_at": 90_000, "days": 30,
+                     "mode": "label-only"})
+    assert acct.is_due(20_000) and acct.due_run(20_000) is None
+    assert app.scheduler_tick(now=20_000) == []            # Gmail isn't contacted during its break
+    assert app.scheduler_tick(now=90_001) == [EMAIL]
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        import time; time.sleep(.01)
+    _, kw = app.fake_runs[-1]
+    assert kw["trigger"] == "resume" and kw["days"] == 30   # the rescan's window is kept
+
+
+def test_cli_due_mode_honours_a_pending_pause(tmp_path, monkeypatch, capsys):
+    from inbox_triage import runner
+    cfg, state = tmp_path / "cfg", tmp_path / "state"
+    (cfg / "tokens").mkdir(parents=True)
+    (cfg / "tokens" / f"{EMAIL}.json").write_text("{}")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-only")
+    calls = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: calls.append(k) or {"processed": 0, "remaining": False})
+    acct = Account(state, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    import time
+    acct.record_run({"started": 1, "trigger": "manual", "status": "paused", "resume_at": int(time.time()) + 900,
+                     "days": 14, "mode": "label-only"})
+    args = ["--all", "--due", "--config-dir", str(cfg), "--state-dir", str(state)]
+    assert runner.main(args) == 0 and calls == []           # due by the clock, but Gmail asked for a break
+    pinned = int(time.time()) - 15 * 86400
+    acct.record_run({"started": 2, "trigger": "manual", "status": "paused", "resume_at": 5, "days": 14,
+                     "since": pinned, "mode": "label-only"})
+    assert runner.main(args) == 0
+    assert calls and calls[0]["since_days"] == 14 and acct.runs(1)[0]["trigger"] == "resume"
+    assert calls[0]["since"] == pinned == acct.runs(1)[0]["since"]  # the rescan's window didn't slide
+    assert calls[0]["dry_run"] is False
+    # --dry-run promises Gmail is never changed, even when resuming a paused label-writing run.
+    acct.record_run({"started": 3, "trigger": "resume", "status": "paused", "resume_at": 5, "days": 14,
+                     "mode": "label-only"})
+    assert runner.main(args + ["--dry-run"]) == 0 and calls[1]["dry_run"] is True
+
+
+def test_paused_job_status_and_throttled_dashboard_reads(app, monkeypatch):
+    from inbox_triage.gmail.client import RateLimited
+    import time
+    app.run_fn = lambda account, root, **kw: {"status": "paused", "resume_at": int(time.time()) + 600,
+                                              "reason": "userRateLimitExceeded", "processed": 3}
+    cookie = signed_in(app)
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, cookie)[0] == 200
+    for _ in range(100):
+        if app.jobs[EMAIL].status != "running":
+            break
+        time.sleep(.01)
+    assert app.jobs[EMAIL].status == "paused"
+    def throttled(email):
+        raise RateLimited(403, "User-rate limit exceeded.", "userRateLimitExceeded", retry_at=time.time() + 600)
+    monkeypatch.setattr(app, "client", throttled)
+    status, _, body = call(app, "GET", f"/api/accounts/{EMAIL}/emails", cookie=cookie)
+    assert status == 429 and "about 10 minutes" in body["error"]
+
+
+def test_dashboard_reuses_recent_message_details(app, monkeypatch):
+    fetches = []
+    class Client:
+        def get_many(self, ids, full=False):
+            fetches.append(list(ids))
+            return [{"id": i, "payload": {"headers": [{"name": "Subject", "value": "Hi " + i}]}} for i in ids]
+    monkeypatch.setattr(app, "client", lambda email: Client())
+    first, ok = app.decorate(EMAIL, [{"id": "m1"}, {"id": "m2"}])
+    assert ok and [d["subject"] for d in first] == ["Hi m1", "Hi m2"]
+    again, ok = app.decorate(EMAIL, [{"id": "m1"}, {"id": "m3"}])
+    assert fetches == [["m1", "m2"], ["m3"]] and again[0]["subject"] == "Hi m1"
+    monkeypatch.setattr(app, "client", lambda email: (_ for _ in ()).throw(RuntimeError("Gmail unreachable")))
+    missing, ok = app.decorate(EMAIL, [{"id": "m9"}])
+    assert not ok and "subject" not in missing[0]    # the page says "unavailable", not "deleted"
+
+
+def test_run_account_records_a_pause_with_its_progress(tmp_path, monkeypatch):
+    from inbox_triage import runner
+    results = iter([{"processed": 100, "gmail_changes": 80, "remaining": True, "outcomes": {"later": 80}},
+                    {"processed": 12, "gmail_changes": 9, "remaining": True, "outcomes": {"later": 9},
+                     "paused_until": 5_000, "pause_code": "userRateLimitExceeded",
+                     "pause_reason": "Gmail API HTTP 403 (userRateLimitExceeded): User-rate limit exceeded."}])
+    batches = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: batches.append(1) or next(results))
+    entry = accounts.run_account(EMAIL, tmp_path, now=1_000)
+    assert len(batches) == 2  # no more batches once Gmail asks for a break
+    assert entry["status"] == "paused" and entry["resume_at"] == 5_000 and entry["reason"] == "userRateLimitExceeded"
+    assert entry["processed"] == 112 and entry["gmail_changes"] == 89
+    acct = Account(tmp_path, EMAIL)
+    assert acct.due_run(now=4_999) is None and acct.due_run(now=5_000) == ("resume", acct.runs(1)[0])
+
+
+def test_a_rescan_keeps_its_window_across_batches_and_resumes(tmp_path, monkeypatch):
+    from inbox_triage import runner
+    seen = []
+    results = iter([{"processed": 100, "remaining": True}, {"processed": 3, "remaining": True, "paused_until": 9_000_000},
+                    {"processed": 50, "remaining": False}])
+    monkeypatch.setattr(runner, "run", lambda *a, **k: seen.append(k["since"]) or next(results))
+    start = 5_000_000
+    first = accounts.run_account(EMAIL, tmp_path, days=30, now=start)
+    assert first["status"] == "paused" and first["since"] == start - 30 * 86400
+    later = accounts.run_account(EMAIL, tmp_path, trigger="resume", days=30, since=first["since"], now=start + 7200)
+    assert later["since"] == first["since"] and seen == [first["since"]] * 3  # the window never slides forward
+
+
+def test_runner_keeps_the_pinned_window_however_long_the_pauses(tmp_path, monkeypatch):
+    from inbox_triage import runner
+    from inbox_triage.context import ContextSyncStats
+    queries = []
+    class Client:
+        def __init__(self, token, **kw): pass
+        def profile(self): return {"emailAddress": EMAIL, "historyId": "8"}
+    monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
+    monkeypatch.setattr(runner, "list_ids", lambda client, query: queries.append(query) or [])
+    monkeypatch.setattr(runner, "ensure_labels", lambda client: {})
+    monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
+    now = 50_000_000
+    ninety = now - 90 * 86400 - 7200        # a 90-day rescan resumed two hours after it started
+    long_paused = now - 90 * 86400 - 6 * 2 * 86400  # ...or after six two-day breaks
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30, since=now - 31 * 86400)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=90, since=ninety)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=90, since=long_paused)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30)
+    assert queries[0].startswith(f"after:{now - 31 * 86400} ")
+    assert queries[1].startswith(f"after:{ninety} ")         # kept, not slid forward
+    assert queries[2].startswith(f"after:{long_paused} ")
+    assert queries[3].startswith(f"after:{now - 30 * 86400} ")  # a new rescan starts its own window
+
+
+def test_resumes_and_run_now_after_a_pause_keep_the_rescan_window(app):
+    acct = Account(app.state_dir, EMAIL)
+    acct.record_run({"started": 1_000, "trigger": "manual", "status": "paused", "resume_at": 2_000, "days": 30,
+                     "since": 777, "mode": "label-only"})
+    def wait():
+        import time
+        for _ in range(100):
+            if app.jobs[EMAIL].status != "running":
+                return
+            time.sleep(.01)
+    assert app.scheduler_tick(now=2_001) == [EMAIL]
+    wait()
+    assert app.fake_runs[-1][1]["since"] == 777 and app.fake_runs[-1][1]["days"] == 30
+    cookie = signed_in(app)
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 30}, cookie)[0] == 200
+    wait()
+    assert app.fake_runs[-1][1]["since"] == 777              # Run now with the same dates continues the rescan
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 7}, cookie)[0] == 200
+    wait()
+    assert app.fake_runs[-1][1]["since"] is None             # different dates: a new window

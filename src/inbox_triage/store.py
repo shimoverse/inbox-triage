@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS context_facts (
  PRIMARY KEY(account_hash, kind, subject_key, topic)
 );
 CREATE INDEX IF NOT EXISTS context_lookup ON context_facts(account_hash,kind,subject_key,expires_at);
+CREATE TABLE IF NOT EXISTS bootstrap_seen (
+ account_hash TEXT NOT NULL, message_key TEXT NOT NULL, PRIMARY KEY(account_hash, message_key)
+);
 """
 def opaque(value: str) -> str: return hashlib.sha256(value.encode()).hexdigest()
 
@@ -62,3 +65,16 @@ class TriageStore:
               SELECT rowid FROM context_facts WHERE account_hash=? ORDER BY occurred_at DESC LIMIT -1 OFFSET ?)""",(ah,max_rows))
     def context_count(self, account: str) -> int:
         return int(self.db.execute("SELECT count(*) FROM context_facts WHERE account_hash=?",(opaque(account.casefold()),)).fetchone()[0])
+
+    # An interrupted first context scan resumes from these (opaque keys, cleared once the scan finishes).
+    def bootstrap_pending(self, account: str, ids) -> list[str]:
+        done = {r[0] for r in self.db.execute("SELECT message_key FROM bootstrap_seen WHERE account_hash=?",
+                                              (opaque(account.casefold()),))}
+        return [mid for mid in ids if scoped_key(account, "bootstrap", mid) not in done]
+    def mark_bootstrapped(self, account: str, ids):
+        ah = opaque(account.casefold())
+        with self.db:
+            self.db.executemany("INSERT OR IGNORE INTO bootstrap_seen(account_hash,message_key) VALUES(?,?)",
+                                [(ah, scoped_key(account, "bootstrap", mid)) for mid in ids])
+    def clear_bootstrap(self, account: str):
+        with self.db: self.db.execute("DELETE FROM bootstrap_seen WHERE account_hash=?", (opaque(account.casefold()),))

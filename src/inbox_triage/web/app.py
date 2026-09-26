@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .. import __version__, config, onboarding
 from ..accounts import FREQUENCIES, Account, run_account
-from ..gmail.client import SCOPE, GmailClient, write_private
+from ..gmail.client import SCOPE, GmailClient, RateLimited, write_private
 from ..preferences import Preferences
 from ..assistant import DEFAULT_MODEL as ASSIST_DEFAULT_MODEL, Assistant
 from ..providers import KEY_ENV, ProviderError, make_provider
@@ -36,6 +36,7 @@ from . import oauth
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "inbox_triage_session"
 SESSION_TTL = 30 * 86400
+SUMMARY_TTL = 600  # seconds the dashboard reuses a message's sender/subject (memory only, never on disk)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -49,7 +50,7 @@ class HTTPError(Exception):
 class Job:
     account: str
     started: int
-    status: str = "running"  # running | ok | error
+    status: str = "running"  # running | ok | paused | error
     result: dict = field(default_factory=dict)
 
 
@@ -62,6 +63,7 @@ class App:
         self.secret = self._load_secret()
         self.pending: dict[str, dict] = {}  # OAuth state -> {verifier, created}
         self.jobs: dict[str, Job] = {}
+        self.summaries: dict[tuple[str, str], tuple[float, dict]] = {}  # (account, message id) -> (when, summary)
         self.lock = threading.Lock()
         allowed = urlparse(self.base_url)
         self.allowed_hosts = {allowed.netloc}
@@ -109,6 +111,10 @@ class App:
         except HTTPError as exc:
             status, headers, body = exc.status, [], json.dumps({"error": exc.message}).encode()
             headers.append(("Content-Type", "application/json"))
+        except RateLimited as exc:
+            minutes = max(1, round((exc.retry_at - time.time()) / 60))
+            message = f"Gmail asked Inbox Triage to slow down. Try again in about {minutes} minute{'s' * (minutes != 1)}."
+            status, headers, body = 429, [("Content-Type", "application/json")], json.dumps({"error": message}).encode()
         except Exception:  # never leak internals to the browser
             traceback.print_exc()
             status, headers, body = 500, [("Content-Type", "application/json")], b'{"error":"Internal error"}'
@@ -230,9 +236,11 @@ class App:
             settings = acct.settings()
             runs = acct.runs(1)
             job = self.jobs.get(email)
+            paused = acct.pending_resume()
             accounts.append({"email": email, "connected": email in connected, "settings": settings,
                              "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
                              "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
+                             "resume_at": paused["resume_at"] if paused else None,
                              "job": job.__dict__ if job else None,
                              "rules": len(acct.preferences().rules)})
         return {"accounts": accounts, "hosted": self.hosted,
@@ -351,12 +359,17 @@ class App:
             except (TypeError, ValueError) as exc:
                 raise HTTPError(400, str(exc)) from None
         if (method, action) == ("POST", "run"):
-            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual")
+            last = acct.runs(1)
+            paused = last[0] if last and last[0].get("status") == "paused" else {}
+            # Running the same dates again right after a pause continues that rescan from where its window began.
+            since = paused.get("since") if paused.get("days") and str(paused["days"]) == str(body.get("days")) else None
+            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since)
         if (method, action) == ("GET", "job"):
             job = self.jobs.get(email)
             return job.__dict__ if job else {}
         if (method, action) == ("GET", "history"):
-            return {"runs": acct.runs(50), "decisions": self.decorate(email, acct.decisions(30))}
+            decisions, details = self.decorate(email, acct.decisions(30))
+            return {"runs": acct.runs(50), "decisions": decisions, "details": details}
         if (method, action) == ("DELETE", ""):
             self.forget_account(email)
             return {"ok": True}
@@ -370,6 +383,7 @@ class App:
             if job and job.status == "running":
                 raise HTTPError(409, "Wait for the current run to finish, then disconnect")
             self.jobs.pop(email, None)
+            self.summaries = {k: v for k, v in self.summaries.items() if k[0] != email}
         token = default_token(email, self.config_dir)
         if token.exists():
             oauth.revoke(token)
@@ -392,15 +406,29 @@ class App:
         ids = client.list_ids(f"in:inbox newer_than:{days}d -in:sent", 40)
         return [_summarize(m) for m in client.get_many(ids, full=False)]
 
-    def decorate(self, email: str, decisions: list[dict]) -> list[dict]:
-        """Fetch subject/from live so no message content is ever stored locally."""
+    def decorate(self, email: str, decisions: list[dict]) -> tuple[list[dict], bool]:
+        """Fetch subject/from live so no message content is ever stored on disk. Recent answers are
+        reused from memory for a few minutes, so reopening the dashboard doesn't cost Gmail quota a
+        run needs. Also says whether the details could be fetched."""
         if not decisions:
-            return []
-        try:
-            fetched = {m.get("id"): _summarize(m) for m in self.client(email).get_many([d["id"] for d in decisions])}
-        except Exception:
-            fetched = {}
-        return [{**d, **fetched.get(d["id"], {})} for d in decisions]
+            return [], True
+        now = time.time()
+        with self.lock:
+            known = {d["id"]: hit[1] for d in decisions
+                     if (hit := self.summaries.get((email, d["id"]))) and now - hit[0] < SUMMARY_TTL}
+        missing = [d["id"] for d in decisions if d["id"] not in known]
+        ok = True
+        if missing:
+            try:
+                fetched = {m.get("id"): _summarize(m) for m in self.client(email).get_many(missing)}
+            except Exception:
+                fetched, ok = {}, False
+            with self.lock:
+                if len(self.summaries) > 5000:
+                    self.summaries.clear()
+                self.summaries.update({(email, mid): (now, summary) for mid, summary in fetched.items()})
+            known.update(fetched)
+        return [{**d, **known.get(d["id"], {})} for d in decisions], ok
 
     def interpret(self, acct: Account, body: dict) -> dict:
         emails = body.get("emails") if isinstance(body.get("emails"), list) else []
@@ -413,7 +441,7 @@ class App:
         return proposed.to_json()
 
     # ------------------------------------------------------------------ jobs
-    def start_job(self, email: str, days, dry_run: bool, trigger: str) -> dict:
+    def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None) -> dict:
         if days not in (None, ""):
             days = _int(days)
             if not 1 <= days <= MAX_WINDOW_DAYS:
@@ -430,32 +458,45 @@ class App:
             if current and current.status == "running":
                 raise HTTPError(409, "A run is already in progress")
             job = self.jobs[email] = Job(email, int(time.time()))
-        threading.Thread(target=self._run_job, args=(job, days, dry_run, trigger), daemon=True).start()
+        threading.Thread(target=self._run_job, args=(job, days, dry_run, trigger, since), daemon=True).start()
         return job.__dict__
 
-    def _run_job(self, job: Job, days, dry_run: bool, trigger: str) -> None:
+    def _run_job(self, job: Job, days, dry_run: bool, trigger: str, since: int | None = None) -> None:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
             model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key(),
                                              allow_machine_key=not self.hosted)
-            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, runner_kwargs={
+            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since, runner_kwargs={
                 "token": default_token(job.account, self.config_dir), "model": model,
                 "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
-            job.status = "ok"
-            _log(f"run ok account={_tag(job.account)} trigger={trigger} processed={job.result.get('processed', 0)} "
-                 f"labeled={job.result.get('gmail_changes', 0)} jev_calls={job.result.get('jev_calls', 0)}")
+            job.status = "paused" if job.result.get("status") == "paused" else "ok"
+            result = job.result
+            detail = (f" resume_in={max(0, int(result.get('resume_at', 0) - time.time()))}s reason={result.get('reason', '')}"
+                      if job.status == "paused" else "")
+            _log(f"run {job.status} account={_tag(job.account)} trigger={trigger} processed={result.get('processed', 0)} "
+                 f"labeled={result.get('gmail_changes', 0)} jev_calls={result.get('jev_calls', 0)} "
+                 f"slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
         except Exception as exc:
             job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
-            _log(f"run error account={_tag(job.account)} trigger={trigger} type={type(exc).__name__}")
+            # Google's status and reason code say what went wrong without any mailbox content.
+            _log(f"run error account={_tag(job.account)} trigger={trigger} type={type(exc).__name__} "
+                 f"status={getattr(exc, 'status', '')} reason={getattr(exc, 'reason', '')}")
 
     def scheduler_tick(self, now: int | None = None) -> list[str]:
         started = []
         for email in discover_accounts(self.config_dir):
             try:
-                if Account(self.state_dir, email).is_due(now):
-                    self.start_job(email, None, False, "schedule")
-                    started.append(email)
+                due = Account(self.state_dir, email).due_run(now)
+                if not due:
+                    continue
+                trigger, paused = due
+                if paused:  # Gmail's break is over: carry on where the paused run stopped, with its window
+                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger,
+                                   since=paused.get("since"))
+                else:
+                    self.start_job(email, None, False, trigger)
+                started.append(email)
             except HTTPError:
                 continue  # already running, or Jev isn't connected
         return started
@@ -488,7 +529,7 @@ def _summarize(message: dict) -> dict:
 
 
 _REASONS = {200: "OK", 302: "Found", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
-            409: "Conflict", 422: "Unprocessable Entity", 500: "Internal Server Error"}
+            409: "Conflict", 422: "Unprocessable Entity", 429: "Too Many Requests", 500: "Internal Server Error"}
 
 
 def serve(argv=None) -> int:

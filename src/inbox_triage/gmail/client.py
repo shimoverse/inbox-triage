@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -17,6 +18,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -25,20 +27,33 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 _METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Authentication-Results"]
 RETRIES = 5
-RETRYABLE = {429, 500, 502, 503, 504}
-# Gmail answers "slow down" with 403 plus one of these reasons; Google says to back off and retry.
-RATE_LIMITED = {"rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"}
-FETCH_WORKERS = 8  # parallel message reads
-# Gmail allows 250 quota units per user per second and a message read costs 5, so stay
-# well under 50 requests a second however many threads are reading.
-MAX_REQUESTS_PER_SECOND = 25
+RETRYABLE = {500, 502, 503, 504}
+# Gmail says "slow down" with a 429, or a 403 with one of these reasons; Google says to back off and retry.
+RATE_LIMITED = {"rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED", "RESOURCE_EXHAUSTED"}
+FETCH_WORKERS = 4  # parallel message reads
+# Gmail limits each mailbox, whichever app is asking: requests in flight at once, and 250 quota units a
+# second (a message read costs 5). Start well under both, halve the pace whenever Gmail pushes back, and
+# creep back up while requests succeed.
+MAX_IN_FLIGHT = 4
+START_RATE, MIN_RATE, MAX_RATE, RATE_STEP = 10.0, 1.0, 20.0, 0.2  # requests a second per mailbox
+MAX_WAIT = 60  # Gmail asks for a longer break than this: stop and come back later instead of holding on
+COOL_DOWN = 15 * 60  # the break to take when Gmail keeps refusing without saying for how long
 TIMEOUT = 60
+_RETRY_AT = re.compile(r"retry after (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d))", re.I)
 
 
 class GmailError(RuntimeError):
     def __init__(self, status: int, message: str = "", reason: str = ""):
         super().__init__(f"Gmail API HTTP {status}" + (f" ({reason})" if reason else "") + (f": {message}" if message else ""))
-        self.status, self.reason = status, reason
+        self.status, self.reason, self.message = status, reason, message
+
+
+class RateLimited(GmailError):
+    """Gmail wants this mailbox left alone for a while; ``retry_at`` (epoch seconds) is when to come back."""
+
+    def __init__(self, status: int, message: str = "", reason: str = "", retry_at: float = 0.0):
+        super().__init__(status, message, reason)
+        self.retry_at = retry_at
 
 
 def _error_details(exc: urllib.error.HTTPError) -> tuple[str, str]:
@@ -55,11 +70,102 @@ def _error_details(exc: urllib.error.HTTPError) -> tuple[str, str]:
     return reason[:60], str(error.get("message") or "")[:160]
 
 
-def _retry_after(exc: urllib.error.HTTPError) -> float:
+def _retry_after(exc: urllib.error.HTTPError, message: str = "") -> float:
+    """Seconds Gmail asked us to wait: a Retry-After header, or "Retry after <time>" in its message."""
+    now, asked = time.time(), 0.0
     try:
-        return min(60.0, float(exc.headers.get("Retry-After") or 0))
-    except (TypeError, ValueError, AttributeError):
-        return 0.0
+        header = str(exc.headers.get("Retry-After") or "").strip()
+    except AttributeError:
+        header = ""
+    found = _RETRY_AT.search(message or "")
+    try:
+        if header:
+            try:
+                asked = float(header)
+            except ValueError:
+                asked = parsedate_to_datetime(header).timestamp() - now
+        elif found:
+            asked = datetime.fromisoformat(found.group(1).replace("Z", "+00:00")).timestamp() - now
+    except (TypeError, ValueError, IndexError):
+        asked = 0.0
+    return min(max(0.0, asked), 2 * 86400) if asked == asked else 0.0  # never negative, NaN, or absurdly long
+
+
+class Throttle:
+    """Request pacing for one mailbox, shared by every client in this process that reads it,
+    so a run and the dashboard reading the same mailbox never add up to more than Gmail allows."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
+        self.rate = START_RATE
+        self.next_at = 0.0        # monotonic time the next request may start
+        self.hold_until = 0.0     # monotonic time a short pause Gmail asked for ends
+        self.blocked_until = 0.0  # wall-clock time Gmail asked us to stay away until
+        self.blocked_by = (429, "", "")
+        self.pushbacks = 0
+
+    def _check(self) -> None:
+        if self.blocked_until > time.time():
+            # Gmail already asked for a break: don't knock again until it's over.
+            raise RateLimited(*self.blocked_by, retry_at=self.blocked_until)
+
+    def check(self) -> None:
+        """Right before sending: honour a break, or a short pause, Gmail asked for while this request
+        waited its turn. Returns only straight after a look at the latest state, never after a sleep."""
+        waited_for, paced = 0.0, False
+        while True:
+            with self.lock:
+                self._check()
+                now, until = time.monotonic(), self.hold_until
+                if until > now and until != waited_for:
+                    # a pause (or a longer one than last time we looked): sit it out
+                    pause, waited_for, paced = until - now, until, False
+                elif waited_for and not paced:
+                    # out of a pause: take a fresh turn at the slower pace so held requests don't all go at once
+                    start = max(now, self.next_at)
+                    self.next_at = start + 1 / self.rate
+                    pause, paced = start - now, True
+                else:
+                    return
+            time.sleep(max(0.0, pause))
+
+    def wait(self) -> None:
+        with self.lock:
+            self._check()
+            now = time.monotonic()
+            start = max(now, self.next_at)
+            self.next_at = start + 1 / self.rate
+        if start > now:
+            time.sleep(start - now)
+
+    def succeeded(self) -> None:
+        with self.lock:
+            self.rate = min(MAX_RATE, self.rate + RATE_STEP)
+
+    def pushed_back(self, pause: float) -> None:
+        """Gmail said slow down: halve the pace and hold every request to this mailbox for ``pause``."""
+        with self.lock:
+            self.pushbacks += 1
+            self.rate = max(MIN_RATE, self.rate / 2)
+            self.hold_until = max(self.hold_until, time.monotonic() + pause)
+            self.next_at = max(self.next_at, self.hold_until)
+
+    def block(self, error: RateLimited) -> None:
+        with self.lock:
+            self.pushbacks += 1
+            self.rate = min(self.rate, START_RATE / 2)  # come back gently
+            if error.retry_at > self.blocked_until:
+                self.blocked_until, self.blocked_by = error.retry_at, (error.status, error.message, error.reason)
+
+
+_THROTTLES: dict[str, Throttle] = {}
+_THROTTLES_LOCK = threading.Lock()
+
+
+def throttle_for(key: str) -> Throttle:
+    with _THROTTLES_LOCK:
+        return _THROTTLES.setdefault(key, Throttle())
 
 
 class HistoryExpired(RuntimeError):
@@ -210,51 +316,70 @@ class GmailClient:
             self.credentials = Credentials.from_file(token_path)
         else:
             raise ValueError("A token path, service account, or credentials object is required")
-        self._pace_lock = threading.Lock()
-        self._next_request_at = 0.0
+        # Gmail's limits are per mailbox, so every client for the same mailbox shares one throttle.
+        path, subject = getattr(self.credentials, "path", None), getattr(self.credentials, "subject", "")
+        key = f"token:{Path(path).expanduser().resolve()}" if path else f"subject:{subject.casefold()}" if subject else ""
+        self.throttle = throttle_for(key) if key else Throttle()
 
     # ------------------------------------------------------------------ transport
-    def _pace(self) -> None:
-        """Space request starts evenly across all threads so bursts stay under Gmail's per-user rate."""
-        with self._pace_lock:
-            now = time.monotonic()
-            start = max(now, self._next_request_at)
-            self._next_request_at = start + 1 / MAX_REQUESTS_PER_SECOND
-        if start > now:
-            time.sleep(start - now)
-
     def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = API + path + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
         data = json.dumps(body).encode() if body is not None else None
         refreshed = False
         for attempt in range(RETRIES + 1):
-            self._pace()
-            wait = 0.0
+            self.throttle.wait()
             headers = {"Authorization": "Bearer " + self.credentials.access_token(), "Accept": "application/json"}
             if data is not None:
                 headers["Content-Type"] = "application/json"
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                    raw = response.read()
-                    return json.loads(raw) if raw else {}
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                reason, message = _error_details(exc)
-                if status == 401 and not refreshed:
-                    self.credentials.access_token(force_refresh=True)
-                    refreshed = True
-                    continue
-                retryable = status in RETRYABLE or (status == 403 and reason in RATE_LIMITED)
-                if not retryable or attempt >= RETRIES:
-                    raise GmailError(status, message, reason) from None
-                wait = _retry_after(exc)
+                with self.throttle.slots:
+                    self.throttle.check()
+                    try:
+                        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+                            raw = response.read()
+                    except urllib.error.HTTPError as exc:
+                        # Decided (and any slow-down recorded) before this slot frees up, so a request
+                        # queued for it can't slip out ahead of the break Gmail just asked for.
+                        wait = self._after_error(exc, attempt, refreshed)
+                    else:
+                        self.throttle.succeeded()
+                        return json.loads(raw) if raw else {}
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 if attempt >= RETRIES:
                     raise
-            # Exponential backoff with jitter, as Google recommends for rate limits and 5xx.
-            time.sleep(max(wait, min(32, 2 ** attempt) + random.random()))
+                wait = min(32, 2 ** attempt) + random.random()
+            if wait is None:  # the access token was rejected: refresh it once and try again
+                self.credentials.access_token(force_refresh=True)
+                refreshed = True
+                continue
+            time.sleep(wait)
         raise GmailError(503)
+
+    def _after_error(self, exc: urllib.error.HTTPError, attempt: int, refreshed: bool) -> float | None:
+        """What an HTTP error means: seconds to wait before retrying, None to refresh the token and
+        retry, or an exception. Gmail's slow-downs are recorded on the mailbox's throttle."""
+        status = exc.code
+        reason, message = _error_details(exc)
+        if status == 401 and not refreshed:
+            return None
+        limited = status == 429 or (status == 403 and reason in RATE_LIMITED)
+        if not (limited or status in RETRYABLE):
+            raise GmailError(status, message, reason) from None
+        asked = _retry_after(exc, message)
+        if limited and (asked > MAX_WAIT or attempt >= RETRIES):
+            # Gmail wants a longer break: stop now and come back when it says (or after a cool-down).
+            error = RateLimited(status, message, reason, retry_at=time.time() + (asked if asked > MAX_WAIT else COOL_DOWN))
+            self.throttle.block(error)
+            raise error from None
+        if attempt >= RETRIES:
+            raise GmailError(status, message, reason) from None
+        # Exponential backoff with jitter, as Google recommends for rate limits and 5xx.
+        wait = max(min(asked, MAX_WAIT), min(32, 2 ** attempt) + random.random())
+        if limited:
+            self.throttle.pushed_back(wait)  # every request to this mailbox waits, this one included
+            return 0.0
+        return wait
 
     # ------------------------------------------------------------------ reads
     def profile(self) -> dict[str, str]:
@@ -281,8 +406,12 @@ class GmailClient:
         if len(ids) <= 1:
             results = [fetch(mid) for mid in ids]
         else:
-            with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(ids))) as pool:
+            pool = ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(ids)))
+            try:
                 results = list(pool.map(fetch, ids))
+            finally:
+                # When Gmail stops us, drop the reads still queued instead of sending them anyway.
+                pool.shutdown(wait=True, cancel_futures=True)
         return [m for m in results if m is not None]
 
     def list_ids(self, query: str, max_results: int | None = None) -> list[str]:
@@ -347,8 +476,9 @@ class GmailClient:
         raw = self._request("GET", f"/messages/{urllib.parse.quote(message_id)}", {"format": "minimal"})
         return set(raw.get("labelIds", ()))
 
-    def modify_labels(self, message_id: str, add: list[str], remove: list[str]) -> None:
-        self._request("POST", f"/messages/{urllib.parse.quote(message_id)}/modify",
+    def modify_labels(self, message_id: str, add: list[str], remove: list[str]) -> dict:
+        """Gmail answers with the message as it is after the change, labels included."""
+        return self._request("POST", f"/messages/{urllib.parse.quote(message_id)}/modify",
                       body={"addLabelIds": add, "removeLabelIds": remove})
 
 
