@@ -221,7 +221,17 @@ def test_a_hold_extended_while_waiting_is_waited_out_too(monkeypatch):
     monkeypatch.setattr(gc.time, "sleep", sleep)
     throttle.pushed_back(2)
     throttle.check()
-    assert len(waits) == 2 and waits[0] <= 2 and waits[1] > 9
+    assert len(waits) == 3 and waits[0] <= 2 and waits[1] > 9  # (the third is its turn at the slower pace)
+
+
+def test_requests_held_by_a_pause_leave_it_one_at_a_time(monkeypatch):
+    throttle, waits = gc.Throttle(), []
+    monkeypatch.setattr(gc.time, "sleep", waits.append)
+    monkeypatch.setattr(gc.time, "monotonic", lambda: 100.0)
+    throttle.pushed_back(2)  # the pace halves to 5 a second and everything holds until 102
+    for _ in range(3):       # three requests that were already queued for a slot
+        throttle.check()
+    assert [round(w, 3) for w in waits[1::2]] == [2.0, 2.2, 2.4]  # then spaced at the slower pace, not a burst
 
 
 def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):

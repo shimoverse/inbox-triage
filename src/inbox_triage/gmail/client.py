@@ -120,9 +120,11 @@ class Throttle:
                 until = self.hold_until
             hold = until - time.monotonic()
             if hold <= 0 or until == waited_for:
-                return
+                break
             time.sleep(hold)
             waited_for = until  # look again: another request may have been told to wait longer meanwhile
+        if waited_for:
+            self.wait()  # out of a pause: take a fresh turn at the slower pace, so held requests don't all go at once
 
     def wait(self) -> None:
         with self.lock:
