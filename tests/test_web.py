@@ -506,6 +506,11 @@ def test_cli_due_mode_honours_a_pending_pause(tmp_path, monkeypatch, capsys):
                      "mode": "label-only"})
     assert runner.main(args) == 0
     assert calls and calls[0]["since_days"] == 14 and acct.runs(1)[0]["trigger"] == "resume"
+    assert calls[0]["dry_run"] is False
+    # --dry-run promises Gmail is never changed, even when resuming a paused label-writing run.
+    acct.record_run({"started": 3, "trigger": "resume", "status": "paused", "resume_at": 5, "days": 14,
+                     "mode": "label-only"})
+    assert runner.main(args + ["--dry-run"]) == 0 and calls[1]["dry_run"] is True
 
 
 def test_paused_job_status_and_throttled_dashboard_reads(app, monkeypatch):

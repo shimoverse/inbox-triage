@@ -368,8 +368,8 @@ def main(argv=None) -> int:
                 if not due:
                     continue  # not due, or Gmail asked for a break that isn't over yet
                 trigger, paused = due
-                if paused:  # carry on where the paused run stopped, with its window
-                    days, dry_run = paused.get("days"), paused.get("mode") == "dry-run"
+                if paused:  # carry on where the paused run stopped, with its window; --dry-run always wins
+                    days, dry_run = paused.get("days"), args.dry_run or paused.get("mode") == "dry-run"
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
             model, api_key = jev_settings(settings, args.model, args.config_dir, acct.jev_key())
