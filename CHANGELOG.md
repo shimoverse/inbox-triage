@@ -2,7 +2,7 @@
 
 ## 0.5.2
 
-- **Gmail rate limits pause a run instead of failing it.** When Gmail says "slow down", the run keeps everything it has done, shows *Paused* (not *Failed*) with the time it carries on, and picks up where it stopped on its own once Gmail's break is over. This follows the time Gmail asks for (`Retry after …`), or waits 15 minutes when Gmail doesn't say. It resumes automatically up to 6 times; clicking Run now never uses those up. While the break lasts, scheduled runs wait too, and the paused run (with its own date range) goes first.
+- **Gmail rate limits pause a run instead of failing it.** When Gmail says "slow down", the run keeps everything it has done, shows *Paused* (not *Failed*) with the time it carries on, and picks up where it stopped on its own once Gmail's break is over. This follows the time Gmail asks for (`Retry after …`), or waits 15 minutes when Gmail doesn't say. It resumes automatically up to 6 times; clicking Run now never uses those up. While the break lasts, scheduled runs wait too, and the paused run (with its own date range) goes first. After a pause, Run now is set to the same dates (and preview) so it continues the same job, and an open dashboard shows the automatic resume without a reload.
 - **Gentler on Gmail.** Gmail limits each mailbox, whichever app is asking, so:
   - A run and the dashboard reading the same mailbox now share one budget: at most 4 requests at a time.
   - The pace starts at 10 requests a second and halves whenever Gmail pushes back. It creeps back up to 20 while requests succeed.

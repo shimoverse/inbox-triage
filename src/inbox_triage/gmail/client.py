@@ -113,13 +113,16 @@ class Throttle:
     def check(self) -> None:
         """Right before sending: honour a break, or a short pause, Gmail asked for while this request
         waited its turn."""
-        with self.lock:
-            self._check()
-            hold = self.hold_until - time.monotonic()
-        if hold > 0:
-            time.sleep(hold)
+        waited_for = 0.0
+        while True:
             with self.lock:
                 self._check()
+                until = self.hold_until
+            hold = until - time.monotonic()
+            if hold <= 0 or until == waited_for:
+                return
+            time.sleep(hold)
+            waited_for = until  # look again: another request may have been told to wait longer meanwhile
 
     def wait(self) -> None:
         with self.lock:
@@ -326,40 +329,51 @@ class GmailClient:
             try:
                 with self.throttle.slots:
                     self.throttle.check()
-                    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                        raw = response.read()
-                self.throttle.succeeded()
-                return json.loads(raw) if raw else {}
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                reason, message = _error_details(exc)
-                if status == 401 and not refreshed:
-                    self.credentials.access_token(force_refresh=True)
-                    refreshed = True
-                    continue
-                limited = status == 429 or (status == 403 and reason in RATE_LIMITED)
-                if not (limited or status in RETRYABLE):
-                    raise GmailError(status, message, reason) from None
-                asked = _retry_after(exc, message)
-                if limited and (asked > MAX_WAIT or attempt >= RETRIES):
-                    # Gmail wants a longer break: stop now and come back when it says (or after a cool-down).
-                    error = RateLimited(status, message, reason,
-                                        retry_at=time.time() + (asked if asked > MAX_WAIT else COOL_DOWN))
-                    self.throttle.block(error)
-                    raise error from None
-                if attempt >= RETRIES:
-                    raise GmailError(status, message, reason) from None
-                # Exponential backoff with jitter, as Google recommends for rate limits and 5xx.
-                wait = max(min(asked, MAX_WAIT), min(32, 2 ** attempt) + random.random())
-                if limited:
-                    self.throttle.pushed_back(wait)  # every request to this mailbox waits, not only this one
-                    continue
+                    try:
+                        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+                            raw = response.read()
+                    except urllib.error.HTTPError as exc:
+                        # Decided (and any slow-down recorded) before this slot frees up, so a request
+                        # queued for it can't slip out ahead of the break Gmail just asked for.
+                        wait = self._after_error(exc, attempt, refreshed)
+                    else:
+                        self.throttle.succeeded()
+                        return json.loads(raw) if raw else {}
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 if attempt >= RETRIES:
                     raise
                 wait = min(32, 2 ** attempt) + random.random()
+            if wait is None:  # the access token was rejected: refresh it once and try again
+                self.credentials.access_token(force_refresh=True)
+                refreshed = True
+                continue
             time.sleep(wait)
         raise GmailError(503)
+
+    def _after_error(self, exc: urllib.error.HTTPError, attempt: int, refreshed: bool) -> float | None:
+        """What an HTTP error means: seconds to wait before retrying, None to refresh the token and
+        retry, or an exception. Gmail's slow-downs are recorded on the mailbox's throttle."""
+        status = exc.code
+        reason, message = _error_details(exc)
+        if status == 401 and not refreshed:
+            return None
+        limited = status == 429 or (status == 403 and reason in RATE_LIMITED)
+        if not (limited or status in RETRYABLE):
+            raise GmailError(status, message, reason) from None
+        asked = _retry_after(exc, message)
+        if limited and (asked > MAX_WAIT or attempt >= RETRIES):
+            # Gmail wants a longer break: stop now and come back when it says (or after a cool-down).
+            error = RateLimited(status, message, reason, retry_at=time.time() + (asked if asked > MAX_WAIT else COOL_DOWN))
+            self.throttle.block(error)
+            raise error from None
+        if attempt >= RETRIES:
+            raise GmailError(status, message, reason) from None
+        # Exponential backoff with jitter, as Google recommends for rate limits and 5xx.
+        wait = max(min(asked, MAX_WAIT), min(32, 2 ** attempt) + random.random())
+        if limited:
+            self.throttle.pushed_back(wait)  # every request to this mailbox waits, this one included
+            return 0.0
+        return wait
 
     # ------------------------------------------------------------------ reads
     def profile(self) -> dict[str, str]:

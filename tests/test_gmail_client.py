@@ -194,6 +194,36 @@ def test_a_request_waiting_its_turn_still_honours_a_short_pause(tmp_path, monkey
     assert len(http.requests) == 1 and max(waits) > 4.5  # it waited out the pause before going
 
 
+def test_a_slow_down_is_recorded_before_the_slot_is_freed(tmp_path, monkeypatch):
+    # Otherwise a request queued for the slot could take it and reach Gmail before the break is known.
+    http = FakeHTTP(monkeypatch)
+    http.route("/profile", (429, {"error": {"code": 429, "message": "Too many concurrent requests for user"}},
+                            {"Retry-After": "3"}), (403, limited_until(900)))
+    client = gc.GmailClient(token_file(tmp_path, expired=False))
+    known = []
+    class Slots:
+        def __enter__(self): return self
+        def __exit__(self, *exc):
+            t = client.throttle
+            known.append((t.hold_until > time.monotonic(), t.blocked_until > time.time()))
+    client.throttle.slots = Slots()
+    with pytest.raises(gc.RateLimited):
+        client.profile()
+    assert known == [(True, False), (True, True)]  # the pause, then the long break, each before release
+
+
+def test_a_hold_extended_while_waiting_is_waited_out_too(monkeypatch):
+    throttle, waits = gc.Throttle(), []
+    def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            throttle.pushed_back(10)  # meanwhile another request is told to wait longer
+    monkeypatch.setattr(gc.time, "sleep", sleep)
+    throttle.pushed_back(2)
+    throttle.check()
+    assert len(waits) == 2 and waits[0] <= 2 and waits[1] > 9
+
+
 def test_short_retry_after_is_honoured_and_slows_the_pace(tmp_path, monkeypatch):
     http = FakeHTTP(monkeypatch)
     waits = []

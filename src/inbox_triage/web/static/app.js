@@ -898,6 +898,13 @@ function statusCard(a) {
   const days = el("select", { "aria-label": "Which emails to sort" }, el("option", { value: "" }, "New mail since last run"),
     WINDOWS.map(([d, l]) => el("option", { value: d }, l)));
   const dry = el("input", { type: "checkbox", id: "dry" });
+  // After a pause, Run now picks up the same job: same dates, and a preview stays a preview.
+  const carry = a.last_run?.status === "paused" ? a.last_run : null;
+  if (carry?.days) {
+    if (!WINDOWS.some(([d]) => d === carry.days)) days.append(el("option", { value: carry.days }, `Last ${carry.days} days`));
+    days.value = String(carry.days);
+  }
+  dry.checked = carry?.mode === "dry-run";
   const runBtn = el("button", { class: "btn primary", type: "button", disabled: running, onclick: async () => {
     runBtn.disabled = true;
     try {
