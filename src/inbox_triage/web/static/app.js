@@ -807,7 +807,9 @@ async function adoptTimeZone(a) {
   try {
     await api(acctPath(a.email, "settings"), "PUT", { schedule: withZone(s) });
     STATE = await api("state");
-    if (current === a.email && tab === "overview") render();
+    // Update the status line in place: a re-render would pull keyboard focus off the page.
+    const line = document.querySelector("#status-h + p"), live = acct();
+    if (line && live && current === a.email) line.textContent = statusText(live)[3];
   } catch { /* keep the server's clock; saving Settings records the zone later */ }
 }
 
@@ -848,7 +850,7 @@ function overviewPane(a) {
   return el("div", { class: "wrap" }, statusCard(a), lastRunCard(a), recent, history);
 }
 
-function statusCard(a) {
+function statusText(a) {
   const job = a.job, running = job?.status === "running", s = a.settings.schedule;
   let kind, glyph, title, sub;
   if (!a.jev_connected) [kind, glyph, title, sub] = ["paused", "needs", "Sorting is paused", "Inbox Triage needs Jev to make decisions. Reconnect it to keep sorting."];
@@ -857,7 +859,12 @@ function statusCard(a) {
     `Runs show what would be labeled; Gmail isn't changed. ${s.frequency === "off" ? "No schedule." : `Runs ${scheduleText(s)}.`}`];
   else if (s.frequency === "off") [kind, glyph, title, sub] = ["manual", "hand", "Sorting runs when you ask", "No schedule is set. Click Run now, or pick one in Settings."];
   else [kind, glyph, title, sub] = ["ok", "sync", "Sorting is on", `${cap(scheduleText(s))} · next run ${upcoming(a.next_run)}`];
+  return [kind, glyph, title, sub];
+}
 
+function statusCard(a) {
+  const job = a.job, running = job?.status === "running";
+  const [kind, glyph, title, sub] = statusText(a);
   const days = el("select", { "aria-label": "Which emails to sort" }, el("option", { value: "" }, "New mail since last run"),
     WINDOWS.map(([d, l]) => el("option", { value: d }, l)));
   const dry = el("input", { type: "checkbox", id: "dry" });
