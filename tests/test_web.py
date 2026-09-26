@@ -55,6 +55,19 @@ def test_static_page_has_strict_csp(app):
     assert call(app, "GET", "/static/../app.py")[0] == 404
 
 
+def test_static_ui_stays_within_the_csp(app):
+    # The CSP has no 'unsafe-inline': no inline styles or scripts, and the UI never parses HTML strings.
+    csp = call(app, "GET", "/")[1]["Content-Security-Policy"]
+    assert "unsafe-inline" not in csp
+    for name in ("index.html", "privacy.html"):
+        html = (webapp.STATIC / name).read_text()
+        assert "style=" not in html and "<style" not in html and "onclick=" not in html
+        assert "<script>" not in html
+    js = (webapp.STATIC / "app.js").read_text()
+    assert "innerHTML" not in js and "insertAdjacentHTML" not in js
+    assert 'setAttribute("style"' not in js
+
+
 def test_security_guards(app):
     assert call(app, "GET", "/api/state", headers={"HTTP_HOST": "evil.example"})[0] == 400
     assert call(app, "POST", "/api/logout", {}, headers={"HTTP_X_REQUESTED_WITH": ""})[0] == 403

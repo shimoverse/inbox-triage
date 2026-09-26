@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- **Redesigned web app.** A calmer, friendlier look built around the labels themselves, with a matching dark mode.
+  - **Welcome page** explains the four labels with an example inbox, the three setup steps, and the privacy promises before asking for Google access. "Continue with Google" is one click; typing an address is optional.
+  - **Setup** has a clear progress bar. Emails get Important / Can wait toggles, rules can be removed before saving, the Jev key is checked inline, and a summary sentence says exactly what will happen ("We'll preview the last 7 days now, then sort new mail every day at 07:00").
+  - **Dashboard** is split into Overview, What matters and Settings tabs. Overview leads with a status card (on, preview, paused or manual) and Run now, a colour-coded breakdown of the last run, recently labeled mail you can filter by label, and a compact run history.
+  - **Accessibility:** real radio groups and switches with keyboard support, a skip link, focus moved to each new screen's heading, inline form errors, and AA contrast in light and dark.
+  - Works on phones: tabs move under the header, and rows and controls stack.
+
 ## 0.4.2
 
 - **For You is now only for people and your priorities.** Mass mail tailored "based on your activity" (listing alerts, picked-for-you offers) from senders you don't correspond with now goes to Later instead.
