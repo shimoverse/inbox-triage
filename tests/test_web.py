@@ -494,3 +494,19 @@ def test_dashboard_reuses_recent_message_details(app, monkeypatch):
     monkeypatch.setattr(app, "client", lambda email: (_ for _ in ()).throw(RuntimeError("Gmail unreachable")))
     missing, ok = app.decorate(EMAIL, [{"id": "m9"}])
     assert not ok and "subject" not in missing[0]    # the page says "unavailable", not "deleted"
+
+
+def test_run_account_records_a_pause_with_its_progress(tmp_path, monkeypatch):
+    from inbox_triage import runner
+    results = iter([{"processed": 100, "gmail_changes": 80, "remaining": True, "outcomes": {"later": 80}},
+                    {"processed": 12, "gmail_changes": 9, "remaining": True, "outcomes": {"later": 9},
+                     "paused_until": 5_000, "pause_code": "userRateLimitExceeded",
+                     "pause_reason": "Gmail API HTTP 403 (userRateLimitExceeded): User-rate limit exceeded."}])
+    batches = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: batches.append(1) or next(results))
+    entry = accounts.run_account(EMAIL, tmp_path, now=1_000)
+    assert len(batches) == 2  # no more batches once Gmail asks for a break
+    assert entry["status"] == "paused" and entry["resume_at"] == 5_000 and entry["reason"] == "userRateLimitExceeded"
+    assert entry["processed"] == 112 and entry["gmail_changes"] == 89
+    acct = Account(tmp_path, EMAIL)
+    assert acct.resume_due(now=4_999) is None and acct.resume_due(now=5_000)["resume_at"] == 5_000
