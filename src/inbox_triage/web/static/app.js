@@ -550,6 +550,8 @@ function stepContext(a, st) {
     return { ...ruleForEmail(m, action), _tag: id };
   });
   // Marking an email wins over a suggestion for the same sender or domain.
+  // Only the emails on screen: they're the ones the notes can refer to, and all that goes to the assistant.
+  const shownEmails = () => (st.emails ? (st.showAll ? st.emails : st.emails.slice(0, 8)) : []);
   const allRules = () => withoutDuplicates([...(st.proposed?.rules || []), ...(st.emails ? quickRules() : [])]);
   const drawRules = () => {
     const rules = allRules();
@@ -572,7 +574,7 @@ function stepContext(a, st) {
   const drawList = () => {
     if (!st.emails) return;
     if (!st.emails.length) return fill(list, el("li", { class: "empty" }, "No recent inbox mail found. You can still describe what matters in your own words."));
-    const shown = st.showAll ? st.emails : st.emails.slice(0, 8);
+    const shown = shownEmails();
     const rest = st.emails.length - shown.length;
     fill(list, shown.map((m, i) => {
       const imp = el("button", { type: "button", class: "toggle important" });
@@ -609,7 +611,7 @@ function stepContext(a, st) {
     if (!st.notes.trim()) { toast("Write a few words about what matters first."); return notes.focus(); }
     btn.disabled = true; fill(btn, "Reading your notes…");
     try {
-      const refs = (st.emails || []).map((m) => ({ from: m.from, domain: m.domain, subject: m.subject }));
+      const refs = shownEmails().map((m) => ({ from: m.from, domain: m.domain, subject: m.subject }));
       st.proposed = await api(acctPath(a.email, "interpret"), "POST", { notes: st.notes, emails: refs });
       drawRules();
       toast(`Found ${plural(st.proposed.rules.length, "rule")}. Review them below.`);
