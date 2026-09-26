@@ -103,3 +103,49 @@ def test_live_runner_verifies_account_and_resumes_without_new_model_call(tmp_pat
     repeat = runner.run("a@example.org", tmp_path / "token.json", tmp_path / "state", now=2_000_001)
     assert repeat["jev_calls"] == repeat["gmail_changes"] == 0
     assert calls == ["synthetic-id"]
+
+
+def test_junk_rule_labels_without_asking_jev_but_never_security_alerts(tmp_path, monkeypatch):
+    from inbox_triage import preferences
+    state = tmp_path / "state"
+    directory = runner.scoped_directory(state, "a@example.org")
+    directory.mkdir(parents=True)
+    rules = preferences.Preferences.from_json({"rules": [{"kind": "keyword", "value": "flash sale", "action": "junk"}]})
+    (directory / "preferences.json").write_text(json.dumps(rules.to_json()))
+    subjects = {"deal": "Flash sale: 70% off everything", "alert": "Security alert: new sign-in (flash sale account)"}
+    applied, created = {}, []
+    class Client:
+        def __init__(self, token, **kw): pass
+        def profile(self): return {"emailAddress": "a@example.org", "historyId": "8"}
+        def _get(self, mid, *, full):
+            return {"id": mid, "payload": {"mimeType": "text/plain", "headers": [{"name": "Subject", "value": subjects[mid]}]}}
+        def attachment_data(self, mid, aid): return ""
+        def labels(self): return [{"id": n, "name": n} for n in created]
+        def create_label(self, name): created.append(name)
+        def message_labels(self, mid): return set(applied.get(mid, ()))
+        def modify_labels(self, mid, add, remove): applied.setdefault(mid, set()).update(add)
+    asked = []
+    class Provider:
+        def classify_with_usage(self, evidence, context):
+            asked.append(evidence.subject)
+            return JevSignals(), {}
+    monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
+    monkeypatch.setattr(runner, "list_ids", lambda client, query: ["deal", "alert"])
+    monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: Provider())
+    monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
+    monkeypatch.setattr(runner, "build_context", lambda *a, **kw: ContextPack())
+    result = runner.run("a@example.org", tmp_path / "token.json", state, now=2_000_000)
+    assert "Triage/Junk" in created                      # created because a Junk rule exists
+    assert applied["deal"] == {"Triage/Junk"}            # junk is labelled...
+    assert asked == [subjects["alert"]]                  # ...without ever going to Jev
+    assert "Triage/Junk" not in applied.get("alert", set())  # security alerts are never junked
+    assert result["outcomes"]["junk"] == 1 and result["jev_calls"] == 1
+
+
+def test_junk_label_is_only_created_when_someone_uses_it():
+    created = []
+    client = SimpleNamespace(labels=lambda: [{"id": n, "name": n} for n in created], create_label=created.append)
+    labels = runner.ensure_labels(client)
+    assert "Triage/Junk" not in created and "Triage/Junk" not in labels
+    assert "Triage/Junk" in runner.ensure_labels(client, "Triage/Junk")

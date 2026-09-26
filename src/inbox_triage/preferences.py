@@ -3,7 +3,8 @@
 Rules are applied locally and deterministically after the model answers, so a
 user's explicit preference always wins over a model guess, with two safety
 exceptions: suspected phishing is never promoted, and security alerts are never
-buried in Later.
+buried in Later or Junk. A Junk rule is decided before the model is asked, so
+junk never reaches Jev.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from pathlib import Path
 from .models import MailEvidence
 
 KINDS = ("sender", "domain", "keyword")
-ACTIONS = ("important", "not_important")
+ACTIONS = ("important", "not_important", "junk")
 MAX_RULES = 200
 MAX_SUMMARY = 600
 

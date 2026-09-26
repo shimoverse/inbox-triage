@@ -26,14 +26,40 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 _METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date", "Authentication-Results"]
 RETRIES = 5
 RETRYABLE = {429, 500, 502, 503, 504}
-FETCH_WORKERS = 8  # parallel message reads; well within Gmail's per-user limits
+# Gmail answers "slow down" with 403 plus one of these reasons; Google says to back off and retry.
+RATE_LIMITED = {"rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"}
+FETCH_WORKERS = 8  # parallel message reads
+# Gmail allows 250 quota units per user per second and a message read costs 5, so stay
+# well under 50 requests a second however many threads are reading.
+MAX_REQUESTS_PER_SECOND = 25
 TIMEOUT = 60
 
 
 class GmailError(RuntimeError):
-    def __init__(self, status: int, message: str = ""):
-        super().__init__(f"Gmail API HTTP {status}" + (f": {message}" if message else ""))
-        self.status = status
+    def __init__(self, status: int, message: str = "", reason: str = ""):
+        super().__init__(f"Gmail API HTTP {status}" + (f" ({reason})" if reason else "") + (f": {message}" if message else ""))
+        self.status, self.reason = status, reason
+
+
+def _error_details(exc: urllib.error.HTTPError) -> tuple[str, str]:
+    """Google's reason code and message from an API error body, when it has one."""
+    try:
+        error = json.loads(exc.read().decode() or "{}").get("error") or {}
+    except Exception:
+        return "", ""
+    if not isinstance(error, dict):
+        return "", str(error)[:160]
+    reasons = [e.get("reason", "") for e in error.get("errors") or [] if isinstance(e, dict)]
+    reasons += [d.get("reason", "") for d in error.get("details") or [] if isinstance(d, dict)]
+    reason = next((r for r in reasons if r), "") or str(error.get("status") or "")
+    return reason[:60], str(error.get("message") or "")[:160]
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float:
+    try:
+        return min(60.0, float(exc.headers.get("Retry-After") or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
 
 
 class HistoryExpired(RuntimeError):
@@ -184,13 +210,26 @@ class GmailClient:
             self.credentials = Credentials.from_file(token_path)
         else:
             raise ValueError("A token path, service account, or credentials object is required")
+        self._pace_lock = threading.Lock()
+        self._next_request_at = 0.0
 
     # ------------------------------------------------------------------ transport
+    def _pace(self) -> None:
+        """Space request starts evenly across all threads so bursts stay under Gmail's per-user rate."""
+        with self._pace_lock:
+            now = time.monotonic()
+            start = max(now, self._next_request_at)
+            self._next_request_at = start + 1 / MAX_REQUESTS_PER_SECOND
+        if start > now:
+            time.sleep(start - now)
+
     def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = API + path + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
         data = json.dumps(body).encode() if body is not None else None
         refreshed = False
         for attempt in range(RETRIES + 1):
+            self._pace()
+            wait = 0.0
             headers = {"Authorization": "Bearer " + self.credentials.access_token(), "Accept": "application/json"}
             if data is not None:
                 headers["Content-Type"] = "application/json"
@@ -201,17 +240,20 @@ class GmailClient:
                     return json.loads(raw) if raw else {}
             except urllib.error.HTTPError as exc:
                 status = exc.code
+                reason, message = _error_details(exc)
                 if status == 401 and not refreshed:
                     self.credentials.access_token(force_refresh=True)
                     refreshed = True
                     continue
-                if status not in RETRYABLE or attempt >= RETRIES:
-                    raise GmailError(status) from None
+                retryable = status in RETRYABLE or (status == 403 and reason in RATE_LIMITED)
+                if not retryable or attempt >= RETRIES:
+                    raise GmailError(status, message, reason) from None
+                wait = _retry_after(exc)
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 if attempt >= RETRIES:
                     raise
-            # Exponential backoff with jitter, as Google recommends for 429/5xx.
-            time.sleep(min(32, 2 ** attempt) + random.random())
+            # Exponential backoff with jitter, as Google recommends for rate limits and 5xx.
+            time.sleep(max(wait, min(32, 2 ** attempt) + random.random()))
         raise GmailError(503)
 
     # ------------------------------------------------------------------ reads

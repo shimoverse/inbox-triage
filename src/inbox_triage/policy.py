@@ -52,7 +52,15 @@ def decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds = Thres
         if "security" in e.protected_kinds:
             return base  # never bury sign-in or verification alerts
         return RoutingDecision(Destination.LATER, "You told us mail like this can wait.", .9, base.topics, True)
-    return base
+    return base  # a Junk rule reaches here only for security alerts, which keep their normal label
+
+
+def junk_decision(e: MailEvidence, preference) -> RoutingDecision | None:
+    """A matching Junk rule labels the message Junk without asking the model at all.
+    Security alerts are the exception: they always get a normal decision."""
+    if preference is None or preference.action != "junk" or "security" in e.protected_kinds:
+        return None
+    return RoutingDecision(Destination.JUNK, "You marked mail like this as junk.", 1.0, TopicDecision(), True)
 
 
 def _decide(e: MailEvidence, c: ContextPack, s: JevSignals, t: Thresholds) -> RoutingDecision:

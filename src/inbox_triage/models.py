@@ -9,6 +9,7 @@ class Destination(StrEnum):
     UPDATES = "updates"
     FOR_YOU = "for_you"
     LATER = "later"
+    JUNK = "junk"  # only ever from the person's own Junk rule
     SPAM = "spam"
     UNCHANGED = "unchanged"
 

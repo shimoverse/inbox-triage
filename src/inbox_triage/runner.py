@@ -16,7 +16,7 @@ from . import preferences
 from .context import bootstrap_context, build_context, sync_incremental
 from .gmail.client import GmailClient, GmailError
 from .gmail.extract import extract_gmail_message
-from .policy import decide
+from .policy import decide, junk_decision
 from .providers import ProviderError, make_provider
 from .store import TriageStore
 
@@ -26,8 +26,9 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
     import msvcrt
 
+JUNK_LABEL = "Triage/Junk"
 ATTENTION = {"needs_you": "Triage/Needs You", "updates": "Triage/Updates",
-             "for_you": "Triage/For You", "later": "Triage/Later"}
+             "for_you": "Triage/For You", "later": "Triage/Later", "junk": JUNK_LABEL}
 TOPICS = {"shopping": "Topics/Shopping"}
 LABELS = tuple(ATTENTION.values()) + tuple(TOPICS.values())
 EXCLUDED = {"SENT", "DRAFT", "SPAM", "TRASH"}
@@ -122,18 +123,21 @@ def account_lock(path: Path):
         yield
 
 
-def ensure_labels(client: GmailClient) -> dict[str, str]:
+def ensure_labels(client: GmailClient, *extra: str) -> dict[str, str]:
+    """Create the standard labels (and ``extra`` ones, e.g. Junk once someone has a Junk rule);
+    return every Inbox Triage label that exists, so stale ones can still be removed."""
     def current() -> dict[str, str]:
         # Gmail label names are case-insensitive; match an existing "triage/later" too.
         return {x["name"].casefold(): x["id"] for x in client.labels()}
+    required = [name for name in LABELS if name != JUNK_LABEL] + list(extra)
     before = current()
-    for name in LABELS:
+    for name in required:
         if name.casefold() not in before:
             client.create_label(name)
     after = current()
-    if not all(name.casefold() in after for name in LABELS):
+    if not all(name.casefold() in after for name in required):
         raise RuntimeError("Gmail label creation readback failed")
-    return {name: after[name.casefold()] for name in LABELS}
+    return {name: after[name.casefold()] for name in LABELS if name.casefold() in after}
 
 
 def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[str, str]) -> bool:
@@ -201,9 +205,10 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
     events = load_events(journal)
     since = now - since_days * 86400 if since_days else None
     ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
-    labels = None if dry_run else ensure_labels(client)
-    provider = make_provider(provider_name, model, api_key=api_key)
     prefs = preferences.load(directory / "preferences.json")
+    junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
+    labels = None if dry_run else ensure_labels(client, *junk)
+    provider = make_provider(provider_name, model, api_key=api_key)
     outcomes, seen, calls, changed, failures = Counter(), 0, 0, 0, 0
     tokens = Counter()
     consecutive = 0
@@ -241,8 +246,14 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                     outcomes["deleted"] += 1  # deleted since it was listed
                     continue
                 evidence = extract_gmail_message(raw, lambda aid, m=mid: client.attachment_data(m, aid))
+                rule = preferences.match(prefs, evidence)
+                junked = junk_decision(evidence, rule)
                 if EXCLUDED.intersection(evidence.labels):
                     proposed = {"id": mid, "status": "classified", "destination": "excluded", "names": []}
+                elif junked:
+                    # The person marked this as junk: label it without sending anything to Jev.
+                    proposed = {"id": mid, "status": "classified", "destination": junked.destination.value,
+                                "names": sorted(desired_names(junked))}
                 else:
                     context = build_context(store, account, evidence, now=now,
                                             priorities_path=directory / "priorities.json")
@@ -269,7 +280,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                     consecutive = 0
                     calls += 1
                     tokens.update(usage)
-                    decision = decide(evidence, context, signals, preference=preferences.match(prefs, evidence))
+                    decision = decide(evidence, context, signals, preference=rule)
                     proposed = {"id": mid, "status": "classified",
                                 "destination": decision.destination.value,
                                 "names": sorted(desired_names(decision))}
@@ -277,6 +288,8 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                 previous = proposed
             if not dry_run:
                 assert labels is not None
+                if JUNK_LABEL in previous["names"] and JUNK_LABEL not in labels:
+                    labels = ensure_labels(client, JUNK_LABEL)  # a junk decision from an earlier run
                 changed += int(apply_labels(client, mid, set(previous["names"]), labels))
                 record({**previous, "status": "verified"})
             outcomes[previous["destination"]] += 1

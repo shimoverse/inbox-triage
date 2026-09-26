@@ -19,8 +19,16 @@ const LABELS = {
   later: { name: "Later", cls: "later", gmail: "Triage/Later",
     help: "Newsletters, promotions and mass mail that can wait until you have time." },
   shopping: { name: "Shopping", cls: "shopping", gmail: "Topics/Shopping" },
+  junk: { name: "Junk", cls: "junk", gmail: "Triage/Junk" },
 };
 const ATTENTION = ["needs_you", "updates", "for_you", "later"];
+const SORTED = [...ATTENTION, "junk"];  // every destination that gets a label, for run breakdowns
+// What a personal rule does. Junk is decided before Jev is asked, so junk never reaches it.
+const ACTION = {
+  important: { name: "Important", cls: "foryou", icon: "foryou", sub: "Gets at least For You" },
+  not_important: { name: "Can wait", cls: "later", icon: "later", sub: "Goes to Later" },
+  junk: { name: "Junk", cls: "junk", icon: "ban", sub: "Labeled Junk, never sent to Jev" },
+};
 const RULE_KIND = { domain: "Domain", sender: "Sender", keyword: "Keyword" };
 const RULE_HINT = { domain: "school.example", sender: "boss@work.example", keyword: "a word or phrase, like invoice" };
 const TITLES = { landing: "Inbox Triage", signin: "Sign in · Inbox Triage", setup: "Setup · Inbox Triage",
@@ -77,6 +85,7 @@ const ICONS = {
   hand: [["path", { d: "M7 5v14l12-7z" }]],
   calendar: [["rect", { x: 3, y: 5, width: 18, height: 16, rx: 2 }], ["path", { d: "M3 10h18M8 3v4M16 3v4" }]],
   zap: [["path", { d: "M13 3 4 14h7l-1 7 9-11h-7z" }]],
+  ban: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M5.6 5.6l12.8 12.8" }]],
 };
 const SVG_NS = "http://www.w3.org/2000/svg";
 function icon(name, size = 16, cls = "") {
@@ -92,7 +101,7 @@ function icon(name, size = 16, cls = "") {
   }
   return svg;
 }
-const LABEL_ICON = { needs_you: "needs", updates: "updates", for_you: "foryou", later: "later", shopping: "shopping" };
+const LABEL_ICON = { needs_you: "needs", updates: "updates", for_you: "foryou", later: "later", shopping: "shopping", junk: "ban" };
 function pill(key, big = false) {
   const meta = LABELS[key];
   return el("span", { class: `pill ${meta.cls}${big ? " lg" : ""}` }, icon(LABEL_ICON[key], big ? 15 : 13), meta.name);
@@ -185,6 +194,20 @@ function senderName(from) {
   return m ? (m[1].trim() || m[2]) : (from || "");
 }
 const acct = () => STATE.accounts.find((a) => a.email === current);
+// The zone schedule hours are picked in; the server runs the schedule in it.
+const BROWSER_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
+const withZone = (sched) => ({ ...sched, tz: BROWSER_TZ || sched.tz || "" });
+// Gmail and Google errors as the person reading them needs them.
+function explainError(text) {
+  const t = String(text || "unknown error");
+  if (/HTTP 403 \((rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED)\)/.test(t)) return "Gmail asked Inbox Triage to slow down. Nothing was lost: run it again and it picks up where it stopped.";
+  if (/HTTP 403 \((insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT)\)/.test(t)) return "Google didn't grant the Gmail permission. Sign out, sign in again, and tick the Gmail box.";
+  if (/HTTP 403 \((accessNotConfigured|SERVICE_DISABLED)\)/.test(t)) return "The Gmail API is turned off for this server's Google Cloud project. Whoever runs the server needs to enable it.";
+  if (/HTTP 403 \((dailyLimitExceeded|quotaExceeded)\)/.test(t)) return "This app reached Gmail's daily limit. It will work again tomorrow.";
+  if (/^Gmail API HTTP 403$/.test(t)) return "Gmail turned down a request (HTTP 403), most likely because the first run read mail too fast. Runs are now paced and retried: click Run now to try again.";
+  if (/invalid_grant|HTTP 401/.test(t)) return "Google access has expired. Sign out and sign in again to reconnect.";
+  return t;
+}
 
 // A row of role=radio buttons with arrow-key support (a real radio group, drawn as buttons).
 function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = "" }) {
@@ -398,7 +421,7 @@ function renderLanding() {
           el("p", {}, "Jev by TypeSafe makes a fast yes-or-no call on each email. Paste your own key from ",
             el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "console.typesafe.ai"), ".")),
         el("li", {}, el("span", { class: "n" }, "Step 3"), el("h3", {}, "Say what matters"),
-          el("p", {}, "Tap Important on a few emails or describe it in your own words. Pick a schedule and you're done.")))),
+          el("p", {}, "Tap Important, Can wait or Junk on a few emails, or describe it in your own words. Pick a schedule and you're done.")))),
     el("section", { class: "trust", "aria-label": "Privacy and safety" },
       el("ul", { class: "trust-grid" }, trust.map(([ic, cls, title, text]) => el("li", {}, icon(ic, 26, cls), el("h3", {}, title), el("p", {}, text)))),
       el("div", { class: "trust-cta" },
@@ -527,8 +550,8 @@ function ruleForEmail(m, action) {
 
 function ruleRow(r, onRemove, label, showAction = true) {
   return el("div", { class: "rrow" },
-    !showAction ? null : r.action === "important" ? el("span", { class: "pill foryou" }, icon("foryou", 13), "Important")
-      : el("span", { class: "pill later" }, icon("later", 13), "Can wait"),
+    showAction ? el("span", { class: "pill " + (ACTION[r.action] || ACTION.not_important).cls },
+      icon((ACTION[r.action] || ACTION.not_important).icon, 13), (ACTION[r.action] || ACTION.not_important).name) : null,
     el("span", { class: "kind" }, RULE_KIND[r.kind] || r.kind),
     el("span", { class: "what" }, el("span", { class: "val" }, r.value), r.note ? el("span", { class: "note" }, r.note) : null),
     onRemove ? el("button", { type: "button", class: "btn icon", "aria-label": label || `Remove rule ${r.value}`, onclick: onRemove }, icon("x", 16)) : null);
@@ -579,15 +602,16 @@ function stepContext(a, st) {
     fill(list, shown.map((m, i) => {
       const imp = el("button", { type: "button", class: "toggle important" });
       const wait = el("button", { type: "button", class: "toggle wait" });
+      const junk = el("button", { type: "button", class: "toggle junk" });
       const li = el("li", {},
         el("div", { class: "meta" }, el("span", { class: "num" }, `#${i + 1}`), el("span", { class: "from" }, senderName(m.from) || m.address)),
         el("span", { class: "subj" }, m.subject || "(no subject)"),
-        el("div", { class: "acts", role: "group", "aria-label": `#${i + 1}: ${m.subject || "(no subject)"}` }, imp, wait,
+        el("div", { class: "acts", role: "group", "aria-label": `#${i + 1}: ${m.subject || "(no subject)"}` }, imp, wait, junk,
           el("button", { type: "button", class: "mention", onclick: () => insertRef(notes, st, i + 1, m) }, "Mention in notes")));
       const sync = rowSync[m.id] = () => {
         const tag = st.tags[m.id];
         li.className = tag || "";
-        for (const [b, action, label] of [[imp, "important", "Important"], [wait, "not_important", "Can wait"]]) {
+        for (const [b, action, label] of [[imp, "important", "Important"], [wait, "not_important", "Can wait"], [junk, "junk", "Junk"]]) {
           b.setAttribute("aria-pressed", String(tag === action));
           fill(b, tag === action ? icon("check", 14) : null, label);
         }
@@ -595,6 +619,7 @@ function stepContext(a, st) {
       const mark = (action) => { st.tags[m.id] = st.tags[m.id] === action ? undefined : action; sync(); drawRules(); };
       imp.addEventListener("click", () => mark("important"));
       wait.addEventListener("click", () => mark("not_important"));
+      junk.addEventListener("click", () => mark("junk"));
       sync();
       return li;
     }), rest > 0 ? el("li", { class: "more" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => {
@@ -658,7 +683,7 @@ function stepContext(a, st) {
       el("section", { class: "card clip", "aria-labelledby": "recent-emails-h" },
         el("div", { class: "card-head" }, el("div", {},
           el("h2", { id: "recent-emails-h" }, "Your recent emails"),
-          el("p", { class: "card-sub" }, "Mark a few as Important or Can wait."))),
+          el("p", { class: "card-sub" }, "Mark a few as Important, Can wait or Junk."))),
         list),
       el("div", { class: "col" },
         el("section", { class: "card pad stack" },
@@ -733,7 +758,7 @@ function stepSchedule(a, st) {
   const finish = async (btn) => {
     btn.disabled = true;
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { schedule: st.schedule, onboarded: true });
+      await api(acctPath(a.email, "settings"), "PUT", { schedule: withZone(st.schedule), onboarded: true });
       await api(acctPath(a.email, "run"), "POST", { days: st.days, dry_run: st.preview });
       toast(st.preview ? "Preview started. Nothing in Gmail will change." : "Sorting started.");
       delete onboard[a.email];
@@ -756,7 +781,8 @@ function stepSchedule(a, st) {
     el("section", { class: "card pad stack", "aria-labelledby": "then-h" },
       el("h2", { id: "then-h" }, "Then keep it sorted"),
       scheduleFields(st.schedule, drawSummary),
-      el("p", { class: "help" }, "Runs happen while Inbox Triage is running on this computer or your server. Each run picks up where the last one stopped.")),
+      el("p", { class: "help" }, `Times are in your time zone${BROWSER_TZ ? ` (${BROWSER_TZ})` : ""}. ` +
+        "Runs happen while Inbox Triage is running on this computer or your server. Each run picks up where the last one stopped.")),
     summary,
     el("div", { class: "actions" },
       el("button", { class: "btn ghost", type: "button", onclick: () => goStep(st, 2) }, "Back"),
@@ -768,6 +794,23 @@ function stepSchedule(a, st) {
 function renderDashboard(a) {
   if (!["overview", "rules", "settings"].includes(tab)) tab = "overview";
   show("dashboard", tab === "rules" ? rulesPane(a) : tab === "settings" ? settingsPane(a) : overviewPane(a));
+  adoptTimeZone(a);
+}
+
+// Schedules saved before time zones were recorded ran on the server's clock, so "07:00" could mean
+// midnight here. The hour was picked in this browser, so record this browser's zone once.
+const zoneAdopted = new Set();
+async function adoptTimeZone(a) {
+  const s = a.settings.schedule;
+  if (s.tz || !BROWSER_TZ || s.frequency === "off" || zoneAdopted.has(a.email)) return;
+  zoneAdopted.add(a.email);
+  try {
+    await api(acctPath(a.email, "settings"), "PUT", { schedule: withZone(s) });
+    STATE = await api("state");
+    // Update the status line in place: a re-render would pull keyboard focus off the page.
+    const line = document.querySelector("#status-h + p"), live = acct();
+    if (line && live && current === a.email) line.textContent = statusText(live)[3];
+  } catch { /* keep the server's clock; saving Settings records the zone later */ }
 }
 
 function pollJob(a) {
@@ -807,7 +850,7 @@ function overviewPane(a) {
   return el("div", { class: "wrap" }, statusCard(a), lastRunCard(a), recent, history);
 }
 
-function statusCard(a) {
+function statusText(a) {
   const job = a.job, running = job?.status === "running", s = a.settings.schedule;
   let kind, glyph, title, sub;
   if (!a.jev_connected) [kind, glyph, title, sub] = ["paused", "needs", "Sorting is paused", "Inbox Triage needs Jev to make decisions. Reconnect it to keep sorting."];
@@ -816,7 +859,12 @@ function statusCard(a) {
     `Runs show what would be labeled; Gmail isn't changed. ${s.frequency === "off" ? "No schedule." : `Runs ${scheduleText(s)}.`}`];
   else if (s.frequency === "off") [kind, glyph, title, sub] = ["manual", "hand", "Sorting runs when you ask", "No schedule is set. Click Run now, or pick one in Settings."];
   else [kind, glyph, title, sub] = ["ok", "sync", "Sorting is on", `${cap(scheduleText(s))} · next run ${upcoming(a.next_run)}`];
+  return [kind, glyph, title, sub];
+}
 
+function statusCard(a) {
+  const job = a.job, running = job?.status === "running";
+  const [kind, glyph, title, sub] = statusText(a);
   const days = el("select", { "aria-label": "Which emails to sort" }, el("option", { value: "" }, "New mail since last run"),
     WINDOWS.map(([d, l]) => el("option", { value: d }, l)));
   const dry = el("input", { type: "checkbox", id: "dry" });
@@ -836,15 +884,16 @@ function statusCard(a) {
     a.jev_connected ? el("div", { class: "runctl" }, days,
       a.settings.dry_run ? null : el("label", { class: "check", for: "dry" }, dry, el("span", {}, "Preview", el("span", { class: "d-only" }, " only"))), runBtn) : null,
     running ? el("div", { class: "progress wide", role: "progressbar", "aria-label": "Sorting in progress" }) : null,
-    failed ? el("p", { class: "notice err wide" }, "Your last manual run didn't finish: ", job.result.message || job.result.error || "unknown error") : null,
+    failed ? el("p", { class: "notice err wide", title: job.result.message || job.result.error || null }, "Your last manual run didn't finish. ", explainError(job.result.message || job.result.error)) : null,
     a.jev_connected ? null : el("div", { class: "wide" }, jevKeyForm(a, () => refresh())));
 }
 
 function outcomeParts(outcomes) {
   const counts = outcomes || {};
   const total = Object.values(counts).reduce((n, v) => n + (+v || 0), 0);
-  const labeled = ATTENTION.reduce((n, k) => n + (counts[k] || 0), 0);
-  return { total, labeled, parts: [...ATTENTION.map((k) => [LABELS[k].name, LABELS[k].cls + "-c", counts[k] || 0]),
+  const labeled = SORTED.reduce((n, k) => n + (counts[k] || 0), 0);
+  const shown = SORTED.filter((k) => k !== "junk" || counts.junk);  // Junk only appears once it's used
+  return { total, labeled, parts: [...shown.map((k) => [LABELS[k].name, LABELS[k].cls + "-c", counts[k] || 0]),
     ["Left as is", "rest-c", Math.max(0, total - labeled)]] };
 }
 function outcomeBar(outcomes, thin = false) {
@@ -875,7 +924,7 @@ function lastRunCard(a) {
       total ? el("ul", { class: "legend" }, parts.map(([name, cls, v]) => el("li", {}, el("span", { class: "sw " + cls }), name, " ", el("b", {}, fmt(v))))) : null,
       preview ? el("p", { class: "small muted" }, "Preview: Gmail wasn't changed.") : null,
       r.remaining ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
-    ] : el("p", { class: "notice err" }, "This run didn't finish: ", r.message || r.error || "unknown error"));
+    ] : el("p", { class: "notice err", title: r.message || r.error || null }, "This run didn't finish. ", explainError(r.message || r.error)));
   const side = el("div", { class: "side" },
     el("span", { class: "kv" }, icon("zap", 16), "Jev decisions"),
     el("span", { class: "bignum" }, r.jev_calls ? fmt(r.jev_calls) : "—"),
@@ -928,7 +977,7 @@ function historyRow(r) {
   const trigger = r.trigger === "schedule" ? "Scheduled" : "Manual";
   const window = r.days ? `Last ${r.days} days · ` : "";
   const summary = ok ? `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`
-    : `Didn't finish: ${r.message || r.error || "unknown error"}`;
+    : `Didn't finish. ${explainError(r.message || r.error)}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
     el("span", { class: "badge" + (r.trigger === "schedule" ? "" : " manual") }, trigger),
@@ -975,15 +1024,16 @@ function rulesPane(a) {
       try { draw(await put(p), "col-" + gone.action); toast(`Removed ${gone.value}.`); }
       catch (err) { toast(err.message); load(); }
     };
-    const column = (act, title, sub) => {
-      const mine = p.rules.map((r, i) => [r, i]).filter(([r]) => (r.action === "important") === (act === "important"));
+    const EMPTY = { important: "No important senders or topics yet.", not_important: "Nothing marked as able to wait yet.",
+      junk: "Nothing marked as junk yet." };
+    const column = (act) => {
+      const mine = p.rules.map((r, i) => [r, i]).filter(([r]) => r.action === act);
       return el("section", { class: "card clip rule-col", "aria-labelledby": "col-" + act },
         el("div", { class: "card-head" }, el("h2", { class: "col-title", id: "col-" + act, tabindex: "-1" },
-          act === "important" ? el("span", { class: "pill foryou lg" }, icon("foryou", 15), "Important")
-            : el("span", { class: "pill later lg" }, icon("later", 15), "Can wait"),
-          el("span", { class: "card-sub" }, sub))),
+          el("span", { class: `pill ${ACTION[act].cls} lg` }, icon(ACTION[act].icon, 15), ACTION[act].name),
+          el("span", { class: "card-sub" }, ACTION[act].sub))),
         mine.length ? el("div", { class: "rlist" }, mine.map(([r, i]) => ruleRow(r, () => remove(i), `Remove rule ${r.value}`, false)))
-          : el("p", { class: "empty" }, act === "important" ? "No important senders or topics yet." : "Nothing marked as able to wait yet."));
+          : el("p", { class: "empty" }, EMPTY[act]));
     };
     const kind = el("select", { id: "rule-kind", "aria-label": "Match on", onchange: () => { kindValue = kind.value; value.placeholder = RULE_HINT[kind.value]; } },
       Object.entries(RULE_KIND).map(([k, label]) => el("option", { value: k, selected: k === kindValue }, label)));
@@ -997,7 +1047,7 @@ function rulesPane(a) {
       const rule = { kind: kind.value, value: v, action, note: "" };
       const same = p.rules.find((r) => ruleKey(r) === ruleKey(rule));
       if (same && same.action === action) {
-        error.textContent = `${v} is already in ${action === "important" ? "Important" : "Can wait"}.`;
+        error.textContent = `${v} is already in ${ACTION[action].name}.`;
         return value.focus();
       }
       const others = p.rules.filter((r) => r !== same);
@@ -1009,22 +1059,23 @@ function rulesPane(a) {
           value.setAttribute("aria-invalid", "true");
           return value.focus();
         }
-        toast(same ? `Moved ${v} to ${action === "important" ? "Important" : "Can wait"}.` : `Added ${v}.`);
+        toast(same ? `Moved ${v} to ${ACTION[action].name}.` : `Added ${v}.`);
         draw(saved, "rule-value");
       } catch (err) { toast(err.message); }
     };
     fill(body,
       p.summary ? el("section", { class: "card keep", "aria-label": "What Jev keeps in mind" }, el("span", { class: "k" }, "What Jev keeps in mind"), el("p", {}, p.summary)) : null,
-      el("div", { class: "cols2" }, column("important", "Important", "Gets at least For You"), column("not_important", "Can wait", "Goes to Later")),
+      el("div", { class: "cols3" }, Object.keys(ACTION).map(column)),
       el("section", { class: "card pad stack", "aria-labelledby": "add-h" },
         el("h2", { id: "add-h" }, "Add a rule"),
         el("form", { class: "rule-add", onsubmit: add },
           radioGroup({ label: "Rule type", value: action, onChange: (v) => (action = v),
-            options: [{ value: "important", label: "Important", cls: "important" }, { value: "not_important", label: "Can wait" }] }),
+            options: Object.entries(ACTION).map(([value, a]) => ({ value, label: a.name, cls: value === "not_important" ? "" : value })) }),
           kind, value, el("button", { class: "btn primary", type: "submit" }, icon("plus", 16), "Add rule")),
         error),
       el("p", { class: "safety" }, icon("shield", 20), el("span", {}, "Sender and domain rules only apply to authenticated mail, so they can't be spoofed. " +
-        "Suspected phishing is never promoted, and security alerts are never pushed to Later.")));
+        "Suspected phishing is never promoted, and security alerts are never pushed to Later or Junk. " +
+        "Junk gets a Junk label; nothing is ever deleted, archived or moved to Spam.")));
     if (focusId) document.getElementById(focusId)?.focus();
   };
   const load = () => api(acctPath(a.email, "preferences")).then((p) => draw(p))
@@ -1053,7 +1104,10 @@ function settingsPane(a) {
     e.preventDefault();
     saveBtn.disabled = true;
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { model: model.value.trim(), dry_run: preview.checked, schedule: sched });
+      const changes = { model: model.value.trim(), dry_run: preview.checked };
+      // Only a changed schedule is saved (with this browser's zone); otherwise its saved zone stays as it is.
+      if (["frequency", "hour", "weekday"].some((k) => sched[k] !== a.settings.schedule[k])) changes.schedule = withZone(sched);
+      await api(acctPath(a.email, "settings"), "PUT", changes);
       STATE = await api("state");
       toast("Settings saved.");
     } catch (err) { toast(err.message); }
@@ -1084,7 +1138,8 @@ function settingsPane(a) {
   return el("div", { class: "wrap slim tabpane" },
     el("div", { class: "page-head" }, el("h1", { tabindex: "-1" }, "Settings")),
     el("form", { class: "card", onsubmit: save, "aria-label": "Settings" },
-      setrow("set-sched", "Schedule", "When new mail gets sorted.", scheduleFields(sched)),
+      setrow("set-sched", "Schedule", "When new mail gets sorted.", scheduleFields(sched),
+        el("p", { class: "help" }, `Times are in ${sched.tz || BROWSER_TZ || "the server's time zone"}.`)),
       setrow("set-preview", "Preview mode", "Try it without touching Gmail.",
         el("label", { class: "switch-row plain", for: "pm" }, preview, previewText)),
       setrow("set-jev", "Jev", "Makes every sorting decision.",

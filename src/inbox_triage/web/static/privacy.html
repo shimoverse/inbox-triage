@@ -24,13 +24,13 @@
 
     <h2>What Inbox Triage does</h2>
     <p>Inbox Triage adds labels to incoming Gmail messages (“Triage/Needs You”, “Triage/Updates”, “Triage/For You”,
-      “Triage/Later”, “Topics/Shopping”) on a schedule you choose. It never sends, deletes, archives, forwards, or marks
+      “Triage/Later”, “Topics/Shopping”, plus “Triage/Junk” if you mark anything as junk) on a schedule you choose. It never sends, deletes, archives, forwards, or marks
       email as read, and never moves email to Spam.</p>
 
     <h2>Google user data we access</h2>
     <ul>
       <li><b>Permission:</b> <code>https://www.googleapis.com/auth/gmail.modify</code>, the narrowest Gmail permission
-        that allows adding labels. It's used only to read received messages, create the five labels above, and add or
+        that allows adding labels. It's used only to read received messages, create the labels above, and add or
         remove those labels.</li>
       <li><b>What is read:</b> headers (sender, subject, date, authentication results), message text, and the IDs of
         messages you sent (to recognise people you correspond with).</li>

@@ -185,8 +185,11 @@ wheels = [
 
 [[package]]
 name = "inbox-triage"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
+dependencies = [
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
 
 [package.optional-dependencies]
 workspace = [
@@ -199,7 +202,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "google-auth", marker = "extra == 'workspace'", specifier = ">=2.0" }]
+requires-dist = [
+    { name = "google-auth", marker = "extra == 'workspace'", specifier = ">=2.0" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
 provides-extras = ["workspace"]
 
 [package.metadata.requires-dev]
@@ -285,4 +291,13 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/31/3d74fa778a63b98b7374323befcc0be5ab3bd94afd4096a0124e7379152c/tzdata-2026.4.tar.gz", hash = "sha256:f1b8bd365d8d210c55353f4d7f8d6d8561c0ba50d704b700d195a9424bba0d79", size = 199350, upload-time = "2026-09-12T12:56:03.251Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/bc/8737e8d54cf51106118039b83f485a4783112fab49ea9d044b234978a46e/tzdata-2026.4-py2.py3-none-any.whl", hash = "sha256:c2169a8b0a7a5e9674da5a135ccdfb2b3e671b333ed9fed17b41f73c34476e81", size = 347494, upload-time = "2026-09-12T12:56:01.67Z" },
 ]

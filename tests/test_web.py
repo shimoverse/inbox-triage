@@ -231,6 +231,37 @@ def test_due_only_after_anchor_and_once_per_slot(tmp_path):
     assert acct.next_run(tomorrow + 60, utc) == int(dt.datetime(2026, 9, 26, 7, tzinfo=utc).timestamp())
 
 
+def test_schedule_runs_in_the_zone_it_was_set_in(tmp_path):
+    # "Every day at 07:00" picked in Los Angeles means 07:00 there, whatever the server's clock is.
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    la = ZoneInfo("America/Los_Angeles")
+    acct = Account(tmp_path, EMAIL)
+    saved = int(dt.datetime(2026, 9, 25, 12, tzinfo=la).timestamp())
+    s = acct.update_settings({"schedule": {"frequency": "daily", "hour": 7, "tz": "America/Los_Angeles"}}, now=saved)
+    assert s["schedule"]["tz"] == "America/Los_Angeles"
+    assert acct.next_run(saved) == int(dt.datetime(2026, 9, 26, 7, tzinfo=la).timestamp())
+    assert not acct.is_due(int(dt.datetime(2026, 9, 26, 6, 59, tzinfo=la).timestamp()))
+    assert acct.is_due(int(dt.datetime(2026, 9, 26, 7, 1, tzinfo=la).timestamp()))
+    # An unknown zone isn't stored; the schedule falls back to the server's clock.
+    assert acct.update_settings({"schedule": {"tz": "Mars/Olympus_Mons"}}, now=saved)["schedule"]["tz"] == ""
+
+
+def test_daily_slot_runs_once_when_clocks_go_back(tmp_path):
+    # 01:00 happens twice in New York on 2026-11-01; a daily 01:00 schedule must run once.
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    acct = Account(tmp_path, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "daily", "hour": 1, "tz": "America/New_York"}},
+                         now=int(dt.datetime(2026, 10, 31, 12, tzinfo=ny).timestamp()))
+    first = int(dt.datetime(2026, 11, 1, 1, 30, tzinfo=ny).timestamp())            # 01:30 EDT
+    assert acct.is_due(first)
+    acct.record_run({"started": first, "trigger": "schedule", "status": "ok"})
+    repeat = int(dt.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=ny).timestamp())   # 01:30 EST, an hour later
+    assert repeat - first == 3600 and not acct.is_due(repeat)
+
+
 def test_run_account_batches_and_records_history(tmp_path, monkeypatch):
     from inbox_triage import runner
     results = iter([{"processed": 100, "remaining": True, "outcomes": {"later": 100}, "mode": "label-only"},
@@ -390,3 +421,13 @@ def test_no_beta_limits_by_default(app, monkeypatch):
     monkeypatch.delenv("INBOX_TRIAGE_MAX_ACCOUNTS", raising=False)
     monkeypatch.delenv("INBOX_TRIAGE_BETA_ENDS", raising=False)
     assert call(app, "GET", "/api/state")[2]["beta"]["enabled"] is False
+
+
+def test_junk_rules_are_saved_and_the_assistant_may_propose_them(app):
+    from inbox_triage import onboarding
+    cookie = signed_in(app)
+    rules = {"rules": [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""},
+                       {"kind": "keyword", "value": "flash sale", "action": "bogus"}], "summary": ""}
+    _, _, saved = call(app, "PUT", f"/api/accounts/{EMAIL}/preferences", rules, cookie)
+    assert saved["rules"] == [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""}]
+    assert "junk" in onboarding.SCHEMA["properties"]["rules"]["items"]["properties"]["action"]["enum"]
