@@ -589,7 +589,7 @@ def test_a_rescan_keeps_its_window_across_batches_and_resumes(tmp_path, monkeypa
     assert later["since"] == first["since"] and seen == [first["since"]] * 3  # the window never slides forward
 
 
-def test_runner_uses_the_pinned_window_but_never_beyond_the_limit(tmp_path, monkeypatch):
+def test_runner_keeps_the_pinned_window_however_long_the_pauses(tmp_path, monkeypatch):
     from inbox_triage import runner
     from inbox_triage.context import ContextSyncStats
     queries = []
@@ -603,13 +603,16 @@ def test_runner_uses_the_pinned_window_but_never_beyond_the_limit(tmp_path, monk
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
     now = 50_000_000
-    ninety = now - 90 * 86400 - 7200  # a 90-day rescan resumed two hours after it started
+    ninety = now - 90 * 86400 - 7200        # a 90-day rescan resumed two hours after it started
+    long_paused = now - 90 * 86400 - 6 * 2 * 86400  # ...or after six two-day breaks
     runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30, since=now - 31 * 86400)
     runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=90, since=ninety)
-    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30, since=1)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=90, since=long_paused)
+    runner.run(EMAIL, tmp_path / "t.json", tmp_path / "s", now=now, since_days=30)
     assert queries[0].startswith(f"after:{now - 31 * 86400} ")
-    assert queries[1].startswith(f"after:{ninety} ")                           # kept, not slid forward
-    assert queries[2].startswith(f"after:{now - runner.JOURNAL_RETENTION} ")  # but no older than the journal
+    assert queries[1].startswith(f"after:{ninety} ")         # kept, not slid forward
+    assert queries[2].startswith(f"after:{long_paused} ")
+    assert queries[3].startswith(f"after:{now - 30 * 86400} ")  # a new rescan starts its own window
 
 
 def test_resumes_and_run_now_after_a_pause_keep_the_rescan_window(app):
