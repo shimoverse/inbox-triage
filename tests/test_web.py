@@ -406,3 +406,13 @@ def test_no_beta_limits_by_default(app, monkeypatch):
     monkeypatch.delenv("INBOX_TRIAGE_MAX_ACCOUNTS", raising=False)
     monkeypatch.delenv("INBOX_TRIAGE_BETA_ENDS", raising=False)
     assert call(app, "GET", "/api/state")[2]["beta"]["enabled"] is False
+
+
+def test_junk_rules_are_saved_and_the_assistant_may_propose_them(app):
+    from inbox_triage import onboarding
+    cookie = signed_in(app)
+    rules = {"rules": [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""},
+                       {"kind": "keyword", "value": "flash sale", "action": "bogus"}], "summary": ""}
+    _, _, saved = call(app, "PUT", f"/api/accounts/{EMAIL}/preferences", rules, cookie)
+    assert saved["rules"] == [{"kind": "domain", "value": "promo-blast.example", "action": "junk", "note": ""}]
+    assert "junk" in onboarding.SCHEMA["properties"]["rules"]["items"]["properties"]["action"]["enum"]

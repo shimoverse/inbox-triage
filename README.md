@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/shimoverse/inbox-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/shimoverse/inbox-triage/actions/workflows/ci.yml)
 
-**Gmail triage powered by [Jev](https://typesafe.ai/).** Sign in with Google, tell it in your own words what matters, and Inbox Triage adds useful Gmail labels on the schedule you choose: `Triage/Needs You`, `Triage/Updates`, `Triage/For You`, `Triage/Later`, `Topics/Shopping`. It never sends, deletes, archives, marks read, or moves mail to Spam. Uncertain mail stays exactly where it was.
+**Gmail triage powered by [Jev](https://typesafe.ai/).** Sign in with Google, tell it in your own words what matters, and Inbox Triage adds useful Gmail labels on the schedule you choose: `Triage/Needs You`, `Triage/Updates`, `Triage/For You`, `Triage/Later`, `Topics/Shopping`, and `Triage/Junk` for anything you mark as junk. It never sends, deletes, archives, marks read, or moves mail to Spam. Uncertain mail stays exactly where it was.
 
 ## Why Jev
 
@@ -51,7 +51,7 @@ The hosted app is **free for the first 100 users** (beta). You bring your own Je
 1. Open the app, click **Continue with Google** and approve the permission to manage Gmail labels.
 2. **Connect Jev.** Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
 3. **Tell it what matters.**
-   - Tap *Important* or *Can wait* on a few recent emails.
+   - Tap *Important*, *Can wait* or *Junk* on a few recent emails.
    - Or type freely: *"#1 is my kids' school, always important. I don't care about real estate emails."* Prefer talking? Speak into Open Voice Flow or any voice-to-text app and paste the text.
    - Click **Turn notes into rules**, review the rules, and save.
 4. **Pick a timeframe** (last day, 7, 30 or 90 days, optionally preview-only) **and a schedule** (hourly, daily, weekly, or the last day of each month).
@@ -96,8 +96,9 @@ Jev decides; it doesn't write. Reading your typed notes and proposing rules is a
 - **Your rules come first, within safety limits.**
   - *Important* senders, domains and topics get at least **For You**.
   - *Can wait* ones go to **Later**.
+  - *Junk* ones get **Junk** and are never sent to Jev, so they cost nothing. Nothing is deleted, archived or moved to Spam; add a Gmail filter on `Triage/Junk` if you want them out of your inbox.
   - Sender and domain rules only apply to authenticated (DMARC, or SPF plus DKIM) mail, so they can't be spoofed.
-  - Suspected phishing is never promoted, and security alerts are never pushed to Later.
+  - Suspected phishing is never promoted, and security alerts are never pushed to Later or Junk.
 - **Runs work in batches.** Scheduled runs continue from the last checkpoint. Batches are 100 messages, with at most 2,000 per run. Runs overlap by two days to catch delayed mail and skip anything already verified.
 - **Context comes from your mailbox.** People you've emailed, threads you joined, and authenticated receipts count. Only account-scoped hashes of these facts are stored, updated through the Gmail History API, and rebuilt automatically if that history expires.
 - **Jev failures are contained.** Jev calls retry on 429 and 529 ("overloaded"). A message that repeatedly gets an unusable answer is left unchanged after three tries. If Jev fails repeatedly in a row, the run stops without advancing.

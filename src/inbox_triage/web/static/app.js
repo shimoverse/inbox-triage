@@ -19,8 +19,16 @@ const LABELS = {
   later: { name: "Later", cls: "later", gmail: "Triage/Later",
     help: "Newsletters, promotions and mass mail that can wait until you have time." },
   shopping: { name: "Shopping", cls: "shopping", gmail: "Topics/Shopping" },
+  junk: { name: "Junk", cls: "junk", gmail: "Triage/Junk" },
 };
 const ATTENTION = ["needs_you", "updates", "for_you", "later"];
+const SORTED = [...ATTENTION, "junk"];  // every destination that gets a label, for run breakdowns
+// What a personal rule does. Junk is decided before Jev is asked, so junk never reaches it.
+const ACTION = {
+  important: { name: "Important", cls: "foryou", icon: "foryou", sub: "Gets at least For You" },
+  not_important: { name: "Can wait", cls: "later", icon: "later", sub: "Goes to Later" },
+  junk: { name: "Junk", cls: "junk", icon: "ban", sub: "Labeled Junk, never sent to Jev" },
+};
 const RULE_KIND = { domain: "Domain", sender: "Sender", keyword: "Keyword" };
 const RULE_HINT = { domain: "school.example", sender: "boss@work.example", keyword: "a word or phrase, like invoice" };
 const TITLES = { landing: "Inbox Triage", signin: "Sign in · Inbox Triage", setup: "Setup · Inbox Triage",
@@ -77,6 +85,7 @@ const ICONS = {
   hand: [["path", { d: "M7 5v14l12-7z" }]],
   calendar: [["rect", { x: 3, y: 5, width: 18, height: 16, rx: 2 }], ["path", { d: "M3 10h18M8 3v4M16 3v4" }]],
   zap: [["path", { d: "M13 3 4 14h7l-1 7 9-11h-7z" }]],
+  ban: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M5.6 5.6l12.8 12.8" }]],
 };
 const SVG_NS = "http://www.w3.org/2000/svg";
 function icon(name, size = 16, cls = "") {
@@ -92,7 +101,7 @@ function icon(name, size = 16, cls = "") {
   }
   return svg;
 }
-const LABEL_ICON = { needs_you: "needs", updates: "updates", for_you: "foryou", later: "later", shopping: "shopping" };
+const LABEL_ICON = { needs_you: "needs", updates: "updates", for_you: "foryou", later: "later", shopping: "shopping", junk: "ban" };
 function pill(key, big = false) {
   const meta = LABELS[key];
   return el("span", { class: `pill ${meta.cls}${big ? " lg" : ""}` }, icon(LABEL_ICON[key], big ? 15 : 13), meta.name);
@@ -412,7 +421,7 @@ function renderLanding() {
           el("p", {}, "Jev by TypeSafe makes a fast yes-or-no call on each email. Paste your own key from ",
             el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "console.typesafe.ai"), ".")),
         el("li", {}, el("span", { class: "n" }, "Step 3"), el("h3", {}, "Say what matters"),
-          el("p", {}, "Tap Important on a few emails or describe it in your own words. Pick a schedule and you're done.")))),
+          el("p", {}, "Tap Important, Can wait or Junk on a few emails, or describe it in your own words. Pick a schedule and you're done.")))),
     el("section", { class: "trust", "aria-label": "Privacy and safety" },
       el("ul", { class: "trust-grid" }, trust.map(([ic, cls, title, text]) => el("li", {}, icon(ic, 26, cls), el("h3", {}, title), el("p", {}, text)))),
       el("div", { class: "trust-cta" },
@@ -541,8 +550,8 @@ function ruleForEmail(m, action) {
 
 function ruleRow(r, onRemove, label, showAction = true) {
   return el("div", { class: "rrow" },
-    !showAction ? null : r.action === "important" ? el("span", { class: "pill foryou" }, icon("foryou", 13), "Important")
-      : el("span", { class: "pill later" }, icon("later", 13), "Can wait"),
+    showAction ? el("span", { class: "pill " + (ACTION[r.action] || ACTION.not_important).cls },
+      icon((ACTION[r.action] || ACTION.not_important).icon, 13), (ACTION[r.action] || ACTION.not_important).name) : null,
     el("span", { class: "kind" }, RULE_KIND[r.kind] || r.kind),
     el("span", { class: "what" }, el("span", { class: "val" }, r.value), r.note ? el("span", { class: "note" }, r.note) : null),
     onRemove ? el("button", { type: "button", class: "btn icon", "aria-label": label || `Remove rule ${r.value}`, onclick: onRemove }, icon("x", 16)) : null);
@@ -593,15 +602,16 @@ function stepContext(a, st) {
     fill(list, shown.map((m, i) => {
       const imp = el("button", { type: "button", class: "toggle important" });
       const wait = el("button", { type: "button", class: "toggle wait" });
+      const junk = el("button", { type: "button", class: "toggle junk" });
       const li = el("li", {},
         el("div", { class: "meta" }, el("span", { class: "num" }, `#${i + 1}`), el("span", { class: "from" }, senderName(m.from) || m.address)),
         el("span", { class: "subj" }, m.subject || "(no subject)"),
-        el("div", { class: "acts", role: "group", "aria-label": `#${i + 1}: ${m.subject || "(no subject)"}` }, imp, wait,
+        el("div", { class: "acts", role: "group", "aria-label": `#${i + 1}: ${m.subject || "(no subject)"}` }, imp, wait, junk,
           el("button", { type: "button", class: "mention", onclick: () => insertRef(notes, st, i + 1, m) }, "Mention in notes")));
       const sync = rowSync[m.id] = () => {
         const tag = st.tags[m.id];
         li.className = tag || "";
-        for (const [b, action, label] of [[imp, "important", "Important"], [wait, "not_important", "Can wait"]]) {
+        for (const [b, action, label] of [[imp, "important", "Important"], [wait, "not_important", "Can wait"], [junk, "junk", "Junk"]]) {
           b.setAttribute("aria-pressed", String(tag === action));
           fill(b, tag === action ? icon("check", 14) : null, label);
         }
@@ -609,6 +619,7 @@ function stepContext(a, st) {
       const mark = (action) => { st.tags[m.id] = st.tags[m.id] === action ? undefined : action; sync(); drawRules(); };
       imp.addEventListener("click", () => mark("important"));
       wait.addEventListener("click", () => mark("not_important"));
+      junk.addEventListener("click", () => mark("junk"));
       sync();
       return li;
     }), rest > 0 ? el("li", { class: "more" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => {
@@ -672,7 +683,7 @@ function stepContext(a, st) {
       el("section", { class: "card clip", "aria-labelledby": "recent-emails-h" },
         el("div", { class: "card-head" }, el("div", {},
           el("h2", { id: "recent-emails-h" }, "Your recent emails"),
-          el("p", { class: "card-sub" }, "Mark a few as Important or Can wait."))),
+          el("p", { class: "card-sub" }, "Mark a few as Important, Can wait or Junk."))),
         list),
       el("div", { class: "col" },
         el("section", { class: "card pad stack" },
@@ -873,8 +884,9 @@ function statusCard(a) {
 function outcomeParts(outcomes) {
   const counts = outcomes || {};
   const total = Object.values(counts).reduce((n, v) => n + (+v || 0), 0);
-  const labeled = ATTENTION.reduce((n, k) => n + (counts[k] || 0), 0);
-  return { total, labeled, parts: [...ATTENTION.map((k) => [LABELS[k].name, LABELS[k].cls + "-c", counts[k] || 0]),
+  const labeled = SORTED.reduce((n, k) => n + (counts[k] || 0), 0);
+  const shown = SORTED.filter((k) => k !== "junk" || counts.junk);  // Junk only appears once it's used
+  return { total, labeled, parts: [...shown.map((k) => [LABELS[k].name, LABELS[k].cls + "-c", counts[k] || 0]),
     ["Left as is", "rest-c", Math.max(0, total - labeled)]] };
 }
 function outcomeBar(outcomes, thin = false) {
@@ -1005,15 +1017,16 @@ function rulesPane(a) {
       try { draw(await put(p), "col-" + gone.action); toast(`Removed ${gone.value}.`); }
       catch (err) { toast(err.message); load(); }
     };
-    const column = (act, title, sub) => {
-      const mine = p.rules.map((r, i) => [r, i]).filter(([r]) => (r.action === "important") === (act === "important"));
+    const EMPTY = { important: "No important senders or topics yet.", not_important: "Nothing marked as able to wait yet.",
+      junk: "Nothing marked as junk yet." };
+    const column = (act) => {
+      const mine = p.rules.map((r, i) => [r, i]).filter(([r]) => r.action === act);
       return el("section", { class: "card clip rule-col", "aria-labelledby": "col-" + act },
         el("div", { class: "card-head" }, el("h2", { class: "col-title", id: "col-" + act, tabindex: "-1" },
-          act === "important" ? el("span", { class: "pill foryou lg" }, icon("foryou", 15), "Important")
-            : el("span", { class: "pill later lg" }, icon("later", 15), "Can wait"),
-          el("span", { class: "card-sub" }, sub))),
+          el("span", { class: `pill ${ACTION[act].cls} lg` }, icon(ACTION[act].icon, 15), ACTION[act].name),
+          el("span", { class: "card-sub" }, ACTION[act].sub))),
         mine.length ? el("div", { class: "rlist" }, mine.map(([r, i]) => ruleRow(r, () => remove(i), `Remove rule ${r.value}`, false)))
-          : el("p", { class: "empty" }, act === "important" ? "No important senders or topics yet." : "Nothing marked as able to wait yet."));
+          : el("p", { class: "empty" }, EMPTY[act]));
     };
     const kind = el("select", { id: "rule-kind", "aria-label": "Match on", onchange: () => { kindValue = kind.value; value.placeholder = RULE_HINT[kind.value]; } },
       Object.entries(RULE_KIND).map(([k, label]) => el("option", { value: k, selected: k === kindValue }, label)));
@@ -1027,7 +1040,7 @@ function rulesPane(a) {
       const rule = { kind: kind.value, value: v, action, note: "" };
       const same = p.rules.find((r) => ruleKey(r) === ruleKey(rule));
       if (same && same.action === action) {
-        error.textContent = `${v} is already in ${action === "important" ? "Important" : "Can wait"}.`;
+        error.textContent = `${v} is already in ${ACTION[action].name}.`;
         return value.focus();
       }
       const others = p.rules.filter((r) => r !== same);
@@ -1039,22 +1052,23 @@ function rulesPane(a) {
           value.setAttribute("aria-invalid", "true");
           return value.focus();
         }
-        toast(same ? `Moved ${v} to ${action === "important" ? "Important" : "Can wait"}.` : `Added ${v}.`);
+        toast(same ? `Moved ${v} to ${ACTION[action].name}.` : `Added ${v}.`);
         draw(saved, "rule-value");
       } catch (err) { toast(err.message); }
     };
     fill(body,
       p.summary ? el("section", { class: "card keep", "aria-label": "What Jev keeps in mind" }, el("span", { class: "k" }, "What Jev keeps in mind"), el("p", {}, p.summary)) : null,
-      el("div", { class: "cols2" }, column("important", "Important", "Gets at least For You"), column("not_important", "Can wait", "Goes to Later")),
+      el("div", { class: "cols3" }, Object.keys(ACTION).map(column)),
       el("section", { class: "card pad stack", "aria-labelledby": "add-h" },
         el("h2", { id: "add-h" }, "Add a rule"),
         el("form", { class: "rule-add", onsubmit: add },
           radioGroup({ label: "Rule type", value: action, onChange: (v) => (action = v),
-            options: [{ value: "important", label: "Important", cls: "important" }, { value: "not_important", label: "Can wait" }] }),
+            options: Object.entries(ACTION).map(([value, a]) => ({ value, label: a.name, cls: value === "not_important" ? "" : value })) }),
           kind, value, el("button", { class: "btn primary", type: "submit" }, icon("plus", 16), "Add rule")),
         error),
       el("p", { class: "safety" }, icon("shield", 20), el("span", {}, "Sender and domain rules only apply to authenticated mail, so they can't be spoofed. " +
-        "Suspected phishing is never promoted, and security alerts are never pushed to Later.")));
+        "Suspected phishing is never promoted, and security alerts are never pushed to Later or Junk. " +
+        "Junk gets a Junk label; nothing is ever deleted, archived or moved to Spam.")));
     if (focusId) document.getElementById(focusId)?.focus();
   };
   const load = () => api(acctPath(a.email, "preferences")).then((p) => draw(p))
