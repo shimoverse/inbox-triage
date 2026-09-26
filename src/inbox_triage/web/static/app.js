@@ -1104,7 +1104,10 @@ function settingsPane(a) {
     e.preventDefault();
     saveBtn.disabled = true;
     try {
-      await api(acctPath(a.email, "settings"), "PUT", { model: model.value.trim(), dry_run: preview.checked, schedule: withZone(sched) });
+      const changes = { model: model.value.trim(), dry_run: preview.checked };
+      // Only a changed schedule is saved (with this browser's zone); otherwise its saved zone stays as it is.
+      if (["frequency", "hour", "weekday"].some((k) => sched[k] !== a.settings.schedule[k])) changes.schedule = withZone(sched);
+      await api(acctPath(a.email, "settings"), "PUT", changes);
       STATE = await api("state");
       toast("Settings saved.");
     } catch (err) { toast(err.message); }

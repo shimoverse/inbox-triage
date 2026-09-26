@@ -247,6 +247,21 @@ def test_schedule_runs_in_the_zone_it_was_set_in(tmp_path):
     assert acct.update_settings({"schedule": {"tz": "Mars/Olympus_Mons"}}, now=saved)["schedule"]["tz"] == ""
 
 
+def test_daily_slot_runs_once_when_clocks_go_back(tmp_path):
+    # 01:00 happens twice in New York on 2026-11-01; a daily 01:00 schedule must run once.
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    acct = Account(tmp_path, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "daily", "hour": 1, "tz": "America/New_York"}},
+                         now=int(dt.datetime(2026, 10, 31, 12, tzinfo=ny).timestamp()))
+    first = int(dt.datetime(2026, 11, 1, 1, 30, tzinfo=ny).timestamp())            # 01:30 EDT
+    assert acct.is_due(first)
+    acct.record_run({"started": first, "trigger": "schedule", "status": "ok"})
+    repeat = int(dt.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=ny).timestamp())   # 01:30 EST, an hour later
+    assert repeat - first == 3600 and not acct.is_due(repeat)
+
+
 def test_run_account_batches_and_records_history(tmp_path, monkeypatch):
     from inbox_triage import runner
     results = iter([{"processed": 100, "remaining": True, "outcomes": {"later": 100}, "mode": "label-only"},

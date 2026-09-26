@@ -20,7 +20,8 @@ classifiers = [
   "Topic :: Communications :: Email",
 ]
 # No runtime dependencies: Gmail, OAuth, Jev and the web app use the standard library.
-dependencies = []
+# The one exception is Windows, which has no IANA time zone database for zoneinfo.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 # Only for Google Workspace domain-wide delegation (RS256 signing of service-account JWTs).

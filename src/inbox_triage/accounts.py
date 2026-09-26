@@ -172,6 +172,9 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
             slot = last_day(year, month)
     else:
         return None
+    if freq != "hourly":
+        # A daily, weekly or monthly hour that happens twice when clocks go back is one slot: its first occurrence.
+        slot = slot.replace(fold=0)
     return int(slot.timestamp())
 
 

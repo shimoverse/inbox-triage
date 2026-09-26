@@ -61,7 +61,7 @@ The hosted app is **free for the first 100 users** (beta). You bring your own Je
 
 ### Path 2: clone and run it yourself
 
-Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/). **No other dependencies**: Gmail, Google sign-in, Jev and the web app all use Python's standard library, so the app loads in about 25 MB of memory.
+Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/). **No other dependencies** (on Windows, just the small `tzdata` package for time zones): Gmail, Google sign-in, Jev and the web app all use Python's standard library, so the app loads in about 25 MB of memory.
 
 ```bash
 git clone https://github.com/shimoverse/inbox-triage.git
