@@ -113,9 +113,11 @@ class Account:
         return events[:limit]
 
     def pending_resume(self) -> dict | None:
-        """The latest run, if Gmail paused it and it will be picked up again automatically."""
+        """The latest run, if Gmail paused it and it will be picked up again automatically.
+        A preview isn't: it keeps no progress, so resuming would only repeat the same Jev calls."""
         runs = self.runs(None)
-        if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at"):
+        if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at") \
+                or runs[0].get("mode") == "dry-run":
             return None
         resumes = 0
         for run in runs:  # every pause since the last finished run; clicking Run now doesn't use up retries

@@ -470,6 +470,16 @@ def test_auto_resume_gives_up_after_a_few_tries_but_clicks_dont_count(tmp_path):
     assert acct.pending_resume() is None
 
 
+def test_a_paused_preview_is_not_replayed_but_still_holds_the_schedule(tmp_path):
+    # A preview keeps no progress, so resuming it would repeat the same Jev calls from the start.
+    acct = Account(tmp_path, EMAIL)
+    acct.update_settings({"schedule": {"frequency": "hourly"}}, now=0)
+    acct.record_run({"started": 100, "trigger": "manual", "status": "paused", "resume_at": 20_000, "mode": "dry-run"})
+    assert acct.pending_resume() is None
+    assert acct.is_due(10_800) and acct.due_run(10_800) is None      # Gmail's break still holds the schedule
+    assert acct.due_run(20_000) == ("schedule", None)                  # then the schedule runs, not a replay
+
+
 def test_schedule_waits_for_gmails_break_then_the_paused_run_goes_first(app):
     # A 30-day rescan paused at 1_000 until 90_000; the hourly schedule comes due meanwhile.
     acct = Account(app.state_dir, EMAIL)

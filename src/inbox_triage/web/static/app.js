@@ -220,7 +220,8 @@ function problem(lead, raw) {
 }
 // When a run Gmail paused carries on by itself.
 function resumeText(a) {
-  if (!a.resume_at) return "Click Run now to pick up where it stopped.";
+  if (!a.resume_at) return a.last_run?.mode === "dry-run" ? "A preview starts over, so run it again once Gmail's break is over."
+    : "Click Run now to pick up where it stopped.";
   return a.resume_at <= Date.now() / 1000 ? "It picks up where it stopped in a moment, on its own."
     : `It picks up where it stopped ${upcoming(a.resume_at)}, on its own.`;
 }
