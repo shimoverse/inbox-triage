@@ -35,3 +35,4 @@ Inbox Triage is deliberately narrow: a local, label-only, conservative sorter. H
 5. **Jev score questions:** use Jev's `score` primitive for urgency levels.
 6. **Apps Script edition:** zero-setup install that runs inside the user's own Google account.
 7. **Desktop packaging:** a signed app bundle with the maintainer's OAuth client, running as a login item.
+8. **Chrome and Brave extension:** a live dashboard bar inside Gmail, with Jev through OpenRouter so beta users bring no key. See [extension-plan.md](extension-plan.md).
