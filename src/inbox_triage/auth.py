@@ -66,6 +66,8 @@ def main(argv=None) -> int:
                    help="Print the consent URL instead of opening a browser (e.g. over SSH with port forwarding)")
     p.add_argument("--port", type=int, default=0, help="Local redirect port (default: any free port)")
     args = p.parse_args(argv)
+    args.config_dir = args.config_dir.expanduser()
+    args.state_dir = args.state_dir.expanduser()
     credentials_file = args.credentials.expanduser()
     if not credentials_file.exists():
         p.error(f"OAuth client JSON not found at {credentials_file}; see the README 'Google Cloud setup' section")
