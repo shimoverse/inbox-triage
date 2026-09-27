@@ -50,24 +50,43 @@
       <li>Inbox Triage's use and transfer of information received from Google APIs adheres to the
         <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data
         Policy</a>, including the Limited Use requirements.</li>
+      <li>The Inbox Triage extension's use of information received from Google APIs adheres to the
+        <a href="https://developer.chrome.com/docs/webstore/program-policies/limited-use">Chrome Web Store User Data
+        Policy</a>, including the Limited Use requirements.</li>
     </ul>
+
+    <h2>Chrome and Brave extension</h2>
+    <p>The optional extension adds a dashboard to Gmail. Its content script reads the Gmail tab title to identify
+      the open account and detect unread-count changes; it does not read message bodies from Gmail's page. Its
+      service worker sends the account address and a revocable server access token to your selected Inbox Triage
+      server to fetch label summaries and request a sync. The dashboard displays recent senders and subjects
+      returned by the server. The extension stores the selected server address, per-account server tokens, and
+      dashboard preferences in browser storage, but no Google OAuth token, AI key, message body or subject. Its
+      Gmail page permission is needed to place the dashboard; labeling is performed by the server through the
+      separately approved Google permission. A self-hosted server may use loopback HTTP rather than HTTPS.</p>
 
     <h2>What is stored</h2>
     <ul>
       <li>Your Google OAuth token, your Jev key, your settings, rules and notes summary, run history, the IDs of
         labeled messages with the labels applied, and hashed (non-reversible) relationship facts.</li>
-      <li>Message bodies and subjects are <b>not</b> stored; the dashboard fetches them live from Gmail.</li>
+      <li>Message bodies and subjects are <b>not</b> stored on disk; the dashboard fetches subjects live from Gmail
+        and the server may cache recent sender/subject details briefly in memory.</li>
       <li>Data is stored on the operator's server with access restricted to the service.</li>
     </ul>
 
     <h2>Deleting your data</h2>
-    <p>Click <b>Disconnect account</b> in the app. It revokes Inbox Triage's access to your Google account and
-      permanently deletes everything stored for that account. You can also revoke access at any time at
-      <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, or email
-      {{SUPPORT_EMAIL}}. Labels already added stay in Gmail; you can delete them there.</p>
+    <p>Click <b>Disconnect account</b> in the app to remove that account's OAuth token, Jev key, settings,
+      rules, notes summary, run history, message IDs and relationship facts from the active server, and invalidate
+      its extension access. The app also asks Google to revoke the grant; if that request fails, remove access at
+      <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.
+      Revoking access at Google alone does not delete data from this server: use Disconnect or contact
+      {{SUPPORT_EMAIL}} for deletion. On the hosted triage.shimoverse.com service, automated encrypted disk
+      snapshots can retain a deleted account's data for up to seven days while the source disk remains active;
+      other self-hosted operators may use different backup policies. Labels already added stay in Gmail; you can
+      delete them there.</p>
 
     <h2>Changes</h2>
-    <p>We'll update this page if data practices change. Last updated: 2026-09-24.</p>
+    <p>We'll update this page if data practices change. Last updated: 2026-09-27.</p>
   </main>
   <footer class="foot">
     <span>Label-only: Inbox Triage never sends, deletes, archives, or marks mail read.</span>

@@ -419,7 +419,7 @@ function renderLanding() {
   const trust = [
     ["shield", "i-good", "Label-only, always", "Never sends, deletes, archives, forwards, or marks mail read, and never moves anything to Spam."],
     ["lock", "i-blue", "Jev sees very little", "Only the sender's domain, the subject and a short cleaned excerpt. Never addresses, attachments, or your Google token."],
-    ["trash", "i-warm", "Leave anytime", "Disconnect revokes Google access and deletes everything stored for your account."],
+    ["trash", "i-warm", "Leave anytime", "Disconnect removes your account data from the active server and asks Google to revoke access. Backups may persist until they expire."],
   ];
   show("landing", el("div", { class: "landing" },
     el("section", { class: "hero" },
@@ -1177,7 +1177,7 @@ function settingsPane(a) {
     saveBtn.disabled = false;
   };
   const disconnect = async () => {
-    if (!confirm(`Disconnect ${a.email}? This revokes access and permanently deletes your rules, settings, Jev key and history here. Labels already in Gmail stay.`)) return;
+    if (!confirm(`Disconnect ${a.email}? This removes your rules, settings, Jev key and history from the active server and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay.`)) return;
     try {
       await api(`accounts/${encodeURIComponent(a.email)}`, "DELETE");
       toast(`Disconnected ${a.email} and deleted its data.`);
@@ -1219,7 +1219,7 @@ function settingsPane(a) {
       el("div", { class: "setrow" },
         el("div", { class: "lbl" }, el("h2", { id: "danger-h" }, "Disconnect"), el("p", {}, "Leave and delete your data.")),
         el("div", { class: "ctl side" },
-          el("p", {}, "Revokes Google access and permanently deletes your rules, settings, Jev key and history here. Labels already in Gmail stay."),
+          el("p", {}, "Removes your rules, settings, Jev key and history from the active server and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay."),
           el("button", { class: "btn danger", type: "button", onclick: disconnect }, icon("trash", 16), "Disconnect account")))));
 }
 

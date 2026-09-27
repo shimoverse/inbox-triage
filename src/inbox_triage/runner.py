@@ -80,6 +80,11 @@ def scoped_directory(root: Path, account: str) -> Path:
     return root / hashlib.sha256(account.casefold().encode()).hexdigest()[:24]
 
 
+def account_lock_path(root: Path, account: str) -> Path:
+    """Lock inode survives deletion of the account's private data directory."""
+    return root.expanduser() / ".locks" / (scoped_directory(root, account).name + ".lock")
+
+
 def scan_query(cursor: int, launch: int, since: int | None = None) -> str:
     start = since if since is not None else max(launch, cursor - 2 * 86400)
     return f"after:{max(0, start)} -in:sent -in:drafts -in:spam -in:trash"
@@ -134,13 +139,14 @@ def save_state(path: Path, state: dict) -> None:
 
 
 @contextlib.contextmanager
-def account_lock(path: Path):
+def account_lock(path: Path, *, blocking: bool = False):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with path.open("a+") as lock:
         try:
             if fcntl:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             else:  # pragma: no cover - Windows
-                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
         except (BlockingIOError, OSError):
             raise RuntimeError("Account triage is already running") from None
         yield
@@ -212,7 +218,7 @@ def desired_names(decision) -> set[str]:
 def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_messages: int = MAX_PER_RUN,
         dry_run: bool = False, now: int | None = None, provider: str = "jev", model: str | None = None,
         service_account: Path | None = None, since_days: int | None = None, api_key: str | None = None,
-        since: int | None = None, jev_budget: JevBudget | None = None) -> dict:
+        since: int | None = None, jev_budget: JevBudget | None = None, _account_locked: bool = False) -> dict:
     """Triage one batch. ``since_days`` rescans that many past days (skipping verified mail)
     instead of continuing from the checkpoint; ``since`` pins where that window starts (epoch
     seconds), so every batch and resume of one rescan covers the same mail. ``jev_budget``
@@ -226,9 +232,11 @@ def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     directory = scoped_directory(root, account)
-    directory.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
-    with account_lock(directory / ".lock"):
+    with (contextlib.nullcontext() if _account_locked else account_lock(account_lock_path(root, account))):
+        if account_lock_path(root, account).with_suffix(".deleted").exists():
+            raise FileNotFoundError(f"No token at {token}; reconnect this account")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
         return _run_locked(account, token, directory, max_messages, dry_run, now, provider, model, service_account,
                            since_days, api_key, since, jev_budget)
 
@@ -421,19 +429,22 @@ def main(argv=None) -> int:
     for account in accounts:
         token = None if args.service_account else (args.token or default_token(account, args.config_dir))
         try:
-            acct = Account(args.state_dir, account)
-            settings = acct.settings()
-            trigger, days, since, dry_run = "cli", args.days, None, args.dry_run
-            if args.due:
-                due = acct.due_run()
-                if not due:
-                    continue  # not due, or Gmail asked for a break that isn't over yet
-                trigger, paused = due
-                if paused:  # carry on where the paused run stopped, with its window; --dry-run always wins
-                    days, since, dry_run = paused.get("days"), paused.get("since"), args.dry_run or paused.get("mode") == "dry-run"
-            if token is not None and not token.expanduser().exists():
-                raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
-            access = jev_access(settings, args.model, args.config_dir, acct.jev_key())
+            with account_lock(account_lock_path(args.state_dir, account)):
+                if account_lock_path(args.state_dir, account).with_suffix(".deleted").exists():
+                    raise FileNotFoundError("Account disconnected; reconnect before running")
+                if token is not None and not token.expanduser().exists():
+                    raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
+                acct = Account(args.state_dir, account)
+                settings = acct.settings()
+                trigger, days, since, dry_run = "cli", args.days, None, args.dry_run
+                if args.due:
+                    due = acct.due_run()
+                    if not due:
+                        continue  # not due, or Gmail asked for a break that isn't over yet
+                    trigger, paused = due
+                    if paused:
+                        days, since, dry_run = paused.get("days"), paused.get("since"), args.dry_run or paused.get("mode") == "dry-run"
+                access = jev_access(settings, args.model, args.config_dir, acct.jev_key())
             result = run_account(account, args.state_dir, trigger=trigger, days=days, since=since,
                                  jev_daily_limit=access.daily_limit,
                                  runner_kwargs={"token": token, "max_messages": args.max,

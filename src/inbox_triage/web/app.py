@@ -25,12 +25,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .. import __version__, config, onboarding
-from ..accounts import FREQUENCIES, Account, run_account
+from ..accounts import DEFAULT_SETTINGS, FREQUENCIES, Account, run_account
 from ..gmail.client import SCOPE, GmailClient, RateLimited, write_private
 from ..preferences import Preferences
 from ..assistant import DEFAULT_MODEL as ASSIST_DEFAULT_MODEL, Assistant
 from ..providers import KEY_ENV, ProviderError, make_provider
-from ..runner import MAX_WINDOW_DAYS, default_token, discover_accounts
+from ..runner import MAX_WINDOW_DAYS, account_lock, account_lock_path, default_token, discover_accounts, scoped_directory
 from . import extension as ext, oauth
 
 STATIC = Path(__file__).parent / "static"
@@ -256,18 +256,22 @@ class App:
         connected = set(discover_accounts(self.config_dir))
         accounts = []
         for email in emails:
-            acct = Account(self.state_dir, email)
-            settings = acct.settings()
-            runs = acct.runs(1)
-            job = self.jobs.get(email)
-            paused = acct.pending_resume()
-            accounts.append({"email": email, "connected": email in connected, "settings": settings,
-                             "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
-                             "own_jev_key": bool(acct.jev_key()),
-                             "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
-                             "resume_at": paused["resume_at"] if paused else None,
-                             "job": job.__dict__ if job else None,
-                             "rules": len(acct.preferences().rules)})
+            if email not in connected:
+                # An older signed session must not recreate a deleted state directory.
+                accounts.append({"email": email, "connected": False, "settings": DEFAULT_SETTINGS,
+                                 "jev_connected": False, "own_jev_key": False, "last_run": None,
+                                 "next_run": None, "resume_at": None, "job": None, "rules": 0})
+                continue
+            try:
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
+                    if not self.connected(email):
+                        accounts.append({"email": email, "connected": False, "settings": DEFAULT_SETTINGS,
+                                         "jev_connected": False, "own_jev_key": False, "last_run": None,
+                                         "next_run": None, "resume_at": None, "job": None, "rules": 0})
+                        continue
+                    accounts.append(self._account_state(email))
+            except RuntimeError:
+                raise HTTPError(409, "Account is busy; try again") from None
         return {"accounts": accounts, "hosted": self.hosted,
                 "oauth_configured": oauth.client_config(self.config_dir) is not None,
                 "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url(),
@@ -275,6 +279,20 @@ class App:
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
                 "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
+
+    def _account_state(self, email: str) -> dict:
+        acct = Account(self.state_dir, email)
+        settings = acct.settings()
+        runs = acct.runs(1)
+        job = self.jobs.get(email)
+        paused = acct.pending_resume()
+        return {"email": email, "connected": True, "settings": settings,
+                "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
+                "own_jev_key": bool(acct.jev_key()),
+                "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
+                "resume_at": paused["resume_at"] if paused else None,
+                "job": job.__dict__ if job else None,
+                "rules": len(acct.preferences().rules)}
 
     # ------------------------------------------------------------------ OAuth
     def login(self, body: dict) -> dict:
@@ -298,7 +316,11 @@ class App:
         with self.lock:
             now = time.time()
             self.pending = {k: v for k, v in self.pending.items() if now - v["created"] < 900}
-            self.pending[state] = {"verifier": verifier, "created": now, "hint": email, "next": after}
+            # Capture every disconnect generation: a hintless Google login only reveals
+            # its account after exchanging the code, so a per-hint snapshot is insufficient.
+            fences = self.config_dir / "disconnect-fences"
+            self.pending[state] = {"verifier": verifier, "created": now, "hint": email, "next": after,
+                                   "fences": {p.name: p.read_text() for p in fences.glob("*.json")}}
         return {"url": url}
 
     @property
@@ -307,8 +329,21 @@ class App:
 
     def oauth_callback(self, environ):
         query = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
+        state = query.get("state", "")
         with self.lock:
-            pending = self.pending.pop(query.get("state", ""), None)
+            pending = self.pending.get(state)
+        if not pending:
+            return self.redirect("/#error=" + quote("Sign-in expired, please try again"))
+        # For a hinted account, reject a busy run before spending Google's
+        # single-use authorization code. Keep state so retrying the callback works.
+        if pending.get("hint") and "code" in query:
+            try:
+                with account_lock(account_lock_path(self.state_dir, pending["hint"])):
+                    pass
+            except RuntimeError:
+                return self.redirect((pending.get("next") or "/") + "#error=" + quote("Account is running; try sign-in again when it finishes"))
+        with self.lock:
+            pending = self.pending.pop(state, None)
         if not pending:
             return self.redirect("/#error=" + quote("Sign-in expired, please try again"))
         back = pending.get("next") or "/"
@@ -323,11 +358,19 @@ class App:
         if SCOPE not in granted:
             return self.redirect(back + "#error=" + quote("Please tick the Gmail permission so labels can be added"))
         email = oauth.profile_email(credentials).casefold()
-        if self.beta_full() and email not in discover_accounts(self.config_dir):
-            # Beta is full: don't keep access to a mailbox we won't serve.
-            oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
-            return self.redirect(back + "#error=" + quote(BETA_FULL))
-        write_private(default_token(email, self.config_dir), credentials.to_json())
+        try:
+            with account_lock(account_lock_path(self.state_dir, email), blocking=True):
+                fence = self.disconnect_fence(email)
+                if pending["fences"].get(fence.name) != (fence.read_text() if fence.exists() else None):
+                    oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
+                    return self.redirect(back + "#error=" + quote("Account was disconnected; sign in again"))
+                if self.beta_full() and email not in discover_accounts(self.config_dir):
+                    oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
+                    return self.redirect(back + "#error=" + quote(BETA_FULL))
+                write_private(default_token(email, self.config_dir), credentials.to_json())
+                account_lock_path(self.state_dir, email).with_suffix(".deleted").unlink(missing_ok=True)
+        except RuntimeError:
+            return self.redirect(back + "#error=" + quote("Account is busy; sign in again"))
         emails = sorted(set(self.session_emails(environ)) | {email})
         target = pending["next"] if pending.get("next") else f"/#account={quote(email)}"
         return self.redirect(target, [("Set-Cookie", self.session_cookie(emails))])
@@ -371,6 +414,20 @@ class App:
 
     # ------------------------------------------------------------------ account API
     def account_api(self, method: str, email: str, action: str, body: dict, query: dict):
+        if (method, action) == ("DELETE", ""):
+            self.forget_account(email)
+            return {"ok": True}
+        try:
+            with account_lock(account_lock_path(self.state_dir, email)):
+                return self._account_api_locked(method, email, action, body, query)
+        except RuntimeError as exc:
+            if str(exc) != "Account triage is already running":
+                raise
+            raise HTTPError(409, "Account is busy; try again") from exc
+
+    def _account_api_locked(self, method: str, email: str, action: str, body: dict, query: dict):
+        if (method, action) != ("DELETE", "") and not self.connected(email):
+            raise HTTPError(409, "Reconnect this account with Google")
         acct = Account(self.state_dir, email)
         if (method, action) == ("GET", "emails"):
             return {"emails": self.recent_emails(email, _int(query.get("days", 7)))}
@@ -398,33 +455,57 @@ class App:
             paused = last[0] if last and last[0].get("status") == "paused" else {}
             # Running the same dates again right after a pause continues that rescan from where its window began.
             since = paused.get("since") if paused.get("days") and str(paused["days"]) == str(body.get("days")) else None
-            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since)
+            return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since,
+                                  _account_locked=True)
         if (method, action) == ("GET", "job"):
             job = self.jobs.get(email)
             return job.__dict__ if job else {}
         if (method, action) == ("GET", "history"):
             decisions, details = self.decorate(email, acct.decisions(30))
             return {"runs": acct.runs(50), "decisions": decisions, "details": details}
-        if (method, action) == ("DELETE", ""):
-            self.forget_account(email)
-            return {"ok": True}
         raise HTTPError(404, "Not found")
+
+    def disconnect_fence(self, email: str) -> Path:
+        return self.config_dir / "disconnect-fences" / (scoped_directory(self.state_dir, email).name + ".json")
+
+    def connected(self, email: str) -> bool:
+        return (default_token(email, self.config_dir).exists()
+                and not account_lock_path(self.state_dir, email).with_suffix(".deleted").exists())
 
     def forget_account(self, email: str) -> None:
         """Disconnect = delete: revoke Google's grant and remove everything stored for
         this account (token, Jev key, rules, settings, history, context, journal)."""
+        try:
+            with account_lock(account_lock_path(self.state_dir, email)):
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
+                    self._forget_account_locked(email)
+        except RuntimeError as exc:
+            if str(exc) != "Account triage is already running":
+                raise
+            raise HTTPError(409, "Wait for the current run to finish, then disconnect") from exc
+        _log(f"account deleted account={_tag(email)}")
+
+    def _forget_account_locked(self, email: str) -> None:
         with self.lock:
             job = self.jobs.get(email)
             if job and job.status == "running":
                 raise HTTPError(409, "Wait for the current run to finish, then disconnect")
-            self.jobs.pop(email, None)
-            self.summaries = {k: v for k, v in self.summaries.items() if k[0] != email}
+        directory = scoped_directory(self.state_dir, email)
+        # Both the runner's exclusive lock and the short read gate are held.
         token = default_token(email, self.config_dir)
         if token.exists():
             oauth.revoke(token)
+        if directory.exists():
+            shutil.rmtree(directory)
+        write_private(account_lock_path(self.state_dir, email).with_suffix(".deleted"), "1")
+        write_private(self.disconnect_fence(email), secrets.token_hex(16))
+        if token.exists():
             token.unlink()
-        shutil.rmtree(Account(self.state_dir, email).dir, ignore_errors=True)
-        _log(f"account deleted account={_tag(email)}")
+        with self.lock:
+            self.jobs.pop(email, None)
+            self.summaries = {k: v for k, v in self.summaries.items() if k[0] != email}
+            self.ext_codes = {k: v for k, v in self.ext_codes.items() if v["email"] != email}
+            self.ext_syncs.pop(email, None)
 
     def client(self, email: str) -> GmailClient:
         token = default_token(email, self.config_dir)
@@ -492,15 +573,42 @@ class App:
             return self.ext_authorize(body, emails)
         if (method, action) == ("POST", "token"):
             return self.ext_token(body)
-        email, token_id = self.ext_account(environ)
-        if (method, action) == ("GET", "summary"):
-            return self.ext_summary(email, query)
-        if (method, action) == ("POST", "sync"):
-            return self.ext_sync(email)
-        if (method, action) == ("DELETE", "token"):
-            ext.TokenRegistry(Account(self.state_dir, email).dir).remove(token_id)
-            return {"ok": True}
-        raise HTTPError(404, "Not found")
+        data = self.ext_identity(environ)
+        email = data["email"]
+        if (method, action) in {("GET", "summary"), ("POST", "sync")}:
+            try:
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
+                    email, _ = self.ext_account(environ)
+                    if (method, action) == ("GET", "summary"):
+                        return self.ext_summary(email, query)
+                    # No run lock is needed to answer a running/paused request.
+                    result = self.ext_sync(email, read_only=True)
+                    if result is not None:
+                        return result
+                try:
+                    with account_lock(account_lock_path(self.state_dir, email)):
+                        if not self.connected(email):
+                            raise HTTPError(401, "Connect the extension again")
+                        return self.ext_sync(email, _account_locked=True)
+                except RuntimeError as exc:
+                    if str(exc) != "Account triage is already running":
+                        raise
+                    return {"started": False, "reason": "running"}
+            except RuntimeError as exc:
+                if str(exc) != "Account triage is already running":
+                    raise
+                raise HTTPError(409, "Account is busy; try again") from exc
+        try:
+            with account_lock(account_lock_path(self.state_dir, email)):
+                email, token_id = self.ext_account(environ)
+                if (method, action) == ("DELETE", "token"):
+                    ext.TokenRegistry(Account(self.state_dir, email).dir).remove(token_id)
+                    return {"ok": True}
+                raise HTTPError(404, "Not found")
+        except RuntimeError as exc:
+            if str(exc) != "Account triage is already running":
+                raise
+            raise HTTPError(409, "Account is busy; try again") from exc
 
     def ext_authorize(self, body: dict, emails: list[str]) -> dict:
         """The connect page, after the person clicks Connect: a one-time code for the extension."""
@@ -512,17 +620,25 @@ class App:
             raise HTTPError(400, "The extension's sign-in request is incomplete; try again from Gmail")
         if email not in emails:
             raise HTTPError(403, "Sign in with this Google account first")
-        if email not in discover_accounts(self.config_dir):
-            raise HTTPError(409, "Reconnect this account with Google")
-        code = secrets.token_urlsafe(32)
-        with self.lock:
-            now = time.time()
-            self.ext_codes = {k: v for k, v in self.ext_codes.items() if now - v["created"] < ext.CODE_TTL}
-            self.ext_codes[code] = {"email": email, "challenge": challenge, "redirect_uri": redirect_uri, "created": now}
-        acct = Account(self.state_dir, email)
-        settings = acct.settings()
-        if not settings["onboarded"] and settings["schedule"]["frequency"] == "off":
-            acct.update_settings({"schedule": {"frequency": "hourly"}})  # keep new mail sorted between visits
+        try:
+            with account_lock(account_lock_path(self.state_dir, email)):
+                if not self.connected(email):
+                    raise HTTPError(409, "Reconnect this account with Google")
+                acct = Account(self.state_dir, email)
+                settings = acct.settings()
+                if not settings["onboarded"] and settings["schedule"]["frequency"] == "off":
+                    acct.update_settings({"schedule": {"frequency": "hourly"}})
+                code = secrets.token_urlsafe(32)
+                with self.lock:
+                    now = time.time()
+                    self.ext_codes = {k: v for k, v in self.ext_codes.items() if now - v["created"] < ext.CODE_TTL}
+                    fence = self.disconnect_fence(email)
+                    self.ext_codes[code] = {"email": email, "challenge": challenge, "redirect_uri": redirect_uri,
+                                            "created": now, "fence": fence.read_text() if fence.exists() else None}
+        except RuntimeError as exc:
+            if str(exc) != "Account triage is already running":
+                raise
+            raise HTTPError(409, "Account is busy; try again") from exc
         _log(f"extension connected account={_tag(email)}")
         sep = "&" if "?" in redirect_uri else "?"
         return {"redirect": f"{redirect_uri}{sep}code={quote(code)}&state={quote(state)}"}
@@ -537,21 +653,38 @@ class App:
                 or not ext.pkce_matches(str(body.get("code_verifier", "")), entry["challenge"]):
             raise HTTPError(400, "Sign-in couldn't be verified, please try again")
         now, token_id = int(time.time()), secrets.token_urlsafe(16)
-        ext.TokenRegistry(Account(self.state_dir, entry["email"]).dir).add(token_id, now)
+        try:
+            with account_lock(account_lock_path(self.state_dir, entry["email"])):
+                fence = self.disconnect_fence(entry["email"])
+                if entry.get("fence") != (fence.read_text() if fence.exists() else None):
+                    raise HTTPError(409, "Reconnect this account with Google")
+                if not self.connected(entry["email"]):
+                    raise HTTPError(409, "Reconnect this account with Google")
+                ext.TokenRegistry(Account(self.state_dir, entry["email"]).dir).add(token_id, now)
+        except RuntimeError as exc:
+            if str(exc) != "Account triage is already running":
+                raise
+            raise HTTPError(409, "Account is busy; try again") from exc
         token = self._sign({"kind": "ext", "email": entry["email"], "tid": token_id, "exp": now + ext.TOKEN_TTL})
         return {"token": token, "email": entry["email"], "expires_at": now + ext.TOKEN_TTL}
 
     def ext_account(self, environ) -> tuple[str, str]:
+        data = self.ext_identity(environ)
+        email, token_id = data["email"], data["tid"]
+        # Disconnecting the account, or the extension, revokes its tokens.
+        if not self.connected(email) \
+                or not ext.TokenRegistry(Account(self.state_dir, email).dir).valid(token_id):
+            raise HTTPError(401, "Connect the extension again")
+        return email, token_id
+
+    def ext_identity(self, environ) -> dict:
         auth = environ.get("HTTP_AUTHORIZATION", "")
         data = self._unsign(auth[7:].strip()) if auth.startswith("Bearer ") else None
         if not data or data.get("kind") != "ext":
             raise HTTPError(401, "Connect the extension again")
-        email, token_id = str(data.get("email", "")), str(data.get("tid", ""))
-        # Disconnecting the account, or the extension, revokes its tokens.
-        if email not in discover_accounts(self.config_dir) \
-                or not ext.TokenRegistry(Account(self.state_dir, email).dir).valid(token_id):
+        if not isinstance(data.get("email"), str) or not EMAIL_RE.fullmatch(data["email"]):
             raise HTTPError(401, "Connect the extension again")
-        return email, token_id
+        return data
 
     def ext_summary(self, email: str, query: dict) -> dict:
         """What the Gmail dashboard bar draws: counts per label per day, the run status, recent decisions."""
@@ -573,9 +706,10 @@ class App:
                 "recent": [{"id": d["id"], "names": d.get("names", []), "from": d.get("from", ""),
                             "subject": d.get("subject", ""), "ts": d.get("ts", 0)} for d in recent]}
 
-    def ext_sync(self, email: str) -> dict:
-        """The extension saw new mail: sort it now, unless a run is going, Gmail asked for a break,
-        or this account's extension already started one in the last minute."""
+    def ext_sync(self, email: str, *, read_only: bool = False, _account_locked: bool = False) -> dict | None:
+        """Check running/paused before taking the run lock; commit a new start under that lock."""
+        if not self.connected(email):
+            raise HTTPError(401, "Connect the extension again")
         acct = Account(self.state_dir, email)
         now = time.time()
         job = self.jobs.get(email)
@@ -584,18 +718,33 @@ class App:
         last = acct.runs(1)
         if last and last[0].get("status") == "paused" and int(last[0].get("resume_at") or 0) > now:
             return {"started": False, "reason": "paused", "resume_at": int(last[0]["resume_at"])}
+        if read_only:
+            return None
         with self.lock:
             if now - self.ext_syncs.get(email, 0) < ext.SYNC_INTERVAL:
                 return {"started": False, "reason": "recent"}
-            self.ext_syncs[email] = now
         try:
-            self.start_job(email, None, False, "extension")
+            self.start_job(email, None, False, "extension", _account_locked=_account_locked)
         except HTTPError as exc:
-            return {"started": False, "reason": "unavailable", "message": exc.message}
+            return {"started": False, "reason": "running" if exc.status == 409 and "busy" in exc.message else "unavailable",
+                    **({"message": exc.message} if "busy" not in exc.message else {})}
+        with self.lock:
+            self.ext_syncs[email] = now
         return {"started": True}
 
     # ------------------------------------------------------------------ jobs
-    def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None) -> dict:
+    def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None,
+                  _account_locked: bool = False) -> dict:
+        if not _account_locked:
+            try:
+                with account_lock(account_lock_path(self.state_dir, email)):
+                    return self.start_job(email, days, dry_run, trigger, since, _account_locked=True)
+            except RuntimeError as exc:
+                if str(exc) != "Account triage is already running":
+                    raise
+                raise HTTPError(409, "Account is busy; try again") from exc
+        if not self.connected(email):
+            raise HTTPError(409, "Reconnect this account with Google")
         if days not in (None, ""):
             days = _int(days)
             if not 1 <= days <= MAX_WINDOW_DAYS:
@@ -615,10 +764,15 @@ class App:
         return job.__dict__
 
     def _run_job(self, job: Job, days, dry_run: bool, trigger: str, since: int | None = None) -> None:
-        acct = Account(self.state_dir, job.account)
-        settings = acct.settings()
         try:
-            access = self.jev_access(acct, settings)
+            # The thread may start after another process disconnects the account.
+            # Fence before Account() (which creates its directory).
+            with account_lock(account_lock_path(self.state_dir, job.account), blocking=True):
+                if not self.connected(job.account):
+                    raise FileNotFoundError("Account disconnected before run started")
+                acct = Account(self.state_dir, job.account)
+                settings = acct.settings()
+                access = self.jev_access(acct, settings)
             job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since,
                                      jev_daily_limit=access.daily_limit, runner_kwargs={
                 "token": default_token(job.account, self.config_dir), "model": access.model,
@@ -640,17 +794,20 @@ class App:
         started = []
         for email in discover_accounts(self.config_dir):
             try:
-                due = Account(self.state_dir, email).due_run(now)
-                if not due:
-                    continue
-                trigger, paused = due
-                if paused:  # Gmail's break is over: carry on where the paused run stopped, with its window
-                    self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger,
-                                   since=paused.get("since"))
-                else:
-                    self.start_job(email, None, False, trigger)
+                with account_lock(account_lock_path(self.state_dir, email)):
+                    if not self.connected(email):
+                        continue
+                    due = Account(self.state_dir, email).due_run(now)
+                    if not due:
+                        continue
+                    trigger, paused = due
+                    if paused:
+                        self.start_job(email, paused.get("days"), paused.get("mode") == "dry-run", trigger,
+                                       since=paused.get("since"), _account_locked=True)
+                    else:
+                        self.start_job(email, None, False, trigger, _account_locked=True)
                 started.append(email)
-            except HTTPError:
+            except (HTTPError, RuntimeError):
                 continue  # already running, or Jev isn't connected
         return started
 

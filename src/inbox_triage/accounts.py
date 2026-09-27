@@ -241,6 +241,18 @@ def run_account(account: str, state_root: Path, *, trigger: str = "manual", days
     ``jev_daily_limit`` is set when the operator's key pays: past that many Jev calls today (UTC),
     the run pauses until midnight UTC, the same way it pauses for Gmail."""
     from . import runner
+    with runner.account_lock(runner.account_lock_path(state_root, account)):
+        token = (runner_kwargs or {}).get("token")
+        if runner.account_lock_path(state_root, account).with_suffix(".deleted").exists():
+            raise FileNotFoundError("Account disconnected; reconnect before running")
+        return _run_account_locked(account, state_root, trigger=trigger, days=days, since=since,
+                                   runner_kwargs=runner_kwargs, now=now, jev_daily_limit=jev_daily_limit)
+
+
+def _run_account_locked(account: str, state_root: Path, *, trigger: str, days: int | None,
+                        since: int | None, runner_kwargs: dict | None, now: int | None,
+                        jev_daily_limit: int | None) -> dict:
+    from . import runner
     started = int(now if now is not None else time.time())
     since = (int(since) if since else started - days * 86400) if days else None
     acct = Account(state_root, account)
@@ -260,7 +272,7 @@ def run_account(account: str, state_root: Path, *, trigger: str = "manual", days
 
     try:
         for _ in range(MAX_BATCHES):
-            kwargs = dict(runner_kwargs or {})
+            kwargs = {**(runner_kwargs or {}), "_account_locked": True}
             if jev_daily_limit:
                 kwargs["jev_budget"] = runner.JevBudget(max(0, jev_daily_limit - acct.sponsored_calls(now)),
                                                         next_utc_midnight(now))

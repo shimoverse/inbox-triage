@@ -84,6 +84,19 @@ def test_a_hosted_server_hands_tokens_only_to_listed_extensions(app, monkeypatch
     assert authorize(app, signed_in(app))[0] == 200
 
 
+def test_unpacked_and_store_ids_can_coexist_during_migration(app, monkeypatch):  # noqa: F811
+    app.hosted = True
+    unpacked = "leagpjpjajkpjaiegjjenjnlegffkofj"
+    store = "ponmlkjihgfedcbaponmlkjihgfedcba"  # illustrative second ID, not an assigned store item
+    monkeypatch.setenv("INBOX_TRIAGE_EXTENSION_IDS", f"{unpacked}, {store}")
+    cookie = signed_in(app)
+    for extension_id in (unpacked, store):
+        redirect = f"https://{extension_id}.chromiumapp.org/cb"
+        assert authorize(app, cookie, redirect_uri=redirect)[0] == 200
+        assert ext.redirect_allowed(redirect, hosted=True)
+    assert not ext.redirect_allowed(REDIRECT, hosted=True)
+
+
 def test_tokens_are_revocable_and_die_with_the_account(app, monkeypatch):  # noqa: F811
     assert call(app, "GET", "/api/ext/summary", headers=ORIGIN)[0] == 401
     assert call(app, "GET", "/api/ext/summary", headers={"HTTP_AUTHORIZATION": "Bearer forged.abc"})[0] == 401
@@ -129,10 +142,25 @@ def test_summary_counts_labels_per_local_day_without_mail_content(app, monkeypat
     assert data["labels"]["Triage/Needs You"] == "needs_you" and data["app_url"].startswith("http")
 
 
+def test_summary_and_sync_remain_usable_during_long_run(app, monkeypatch):
+    from inbox_triage import accounts, runner
+    token = connect(app)
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    def batch(*args, **kwargs):
+        status, _, summary = call(app, "GET", "/api/ext/summary", headers=bearer(token))
+        assert status == 200 and summary["email"] == EMAIL
+        status, _, sync = call(app, "POST", "/api/ext/sync", {}, headers=bearer(token))
+        assert status == 200 and sync == {"started": False, "reason": "running"}
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 409
+        return {"processed": 0, "remaining": False}
+    monkeypatch.setattr(runner, "run", batch)
+    assert accounts.run_account(EMAIL, app.state_dir)["status"] == "ok"
+
+
 def test_sync_starts_a_run_but_never_more_than_once_a_minute(app, monkeypatch):  # noqa: F811
     token = connect(app)
     started = []
-    monkeypatch.setattr(app, "start_job", lambda email, days, dry_run, trigger, since=None: started.append(trigger))
+    monkeypatch.setattr(app, "start_job", lambda email, days, dry_run, trigger, since=None, **kw: started.append(trigger))
     assert call(app, "POST", "/api/ext/sync", {}, headers=bearer(token))[2] == {"started": True}
     assert call(app, "POST", "/api/ext/sync", {}, headers=bearer(token))[2]["reason"] == "recent"
     assert started == ["extension"]
