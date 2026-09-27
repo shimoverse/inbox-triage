@@ -17,7 +17,7 @@ The goal is for a person to open Gmail, see a live Inbox Triage dashboard across
 2. **Open Gmail.** A slim bar appears above the inbox: *Sort my inbox automatically*, with a **Connect Gmail** button.
 3. **Connect Gmail.** A Google window opens and they approve Gmail access. Google's wording is broad, but the app only adds labels. There is no key to paste and no settings page to visit.
 4. **First results within about 30 seconds.** The server labels the last 7 days and the bar fills in live as it goes.
-5. **After that it runs by itself.** While Gmail is open, new mail is labeled within about a minute; the rest of the time it runs on a schedule (hourly by default). The labels are ordinary Gmail labels, so they also appear on the phone.
+5. **After that it runs by itself.** New mail is labeled within about two minutes whether or not Gmail is open, and sooner when the bar nudges the server. The labels are ordinary Gmail labels, so they also appear on the phone.
 6. **Teaching comes after the first results.** Once the bar has shown results, it offers *Teach it: mark a few emails Important, Can wait or Junk*. This is the same rules system as today, moved after the first result instead of before it.
 
 The bar, collapsed to one line, can be expanded:
@@ -53,7 +53,7 @@ flowchart LR
     RUN -- "one server-side OpenRouter key" --> J["Jev via OpenRouter"]
 ```
 
-**The extension draws the dashboard; the server does all the work.** The extension never holds a Google token or an AI key, and it doesn't read email. It shows the counts and recent decisions the server already records, and it tells the server when to look for new mail. Doing the work on the server is right for four reasons:
+**The extension draws the dashboard; the server does all the work.** The extension never holds a Google token or an AI key, and it doesn't read email. It shows the counts and recent decisions the server already records, and it nudges the server to look for new mail sooner. Doing the work on the server is right for four reasons:
 
 - **An AI key can't live in an extension.** Anyone can unzip an extension package and read the key; see *Keys* below.
 - **The server already does the hard parts.** Google OAuth with PKCE, batched Gmail reads, rate-limit pauses, checkpoints, dedupe, rules, schedules, run history, and the tested Python policy. None of it has to be ported to JavaScript.
@@ -64,10 +64,10 @@ flowchart LR
 
 | Piece | Where | What it does |
 |---|---|---|
-| Dashboard bar | `extension/` content script | Inserted above Gmail's main area inside a Shadow DOM so Gmail's CSS can't break it. Charts are small inline SVG (no chart library; Chrome Web Store rules forbid loading remote code). |
-| Sign-in bridge | `extension/` service worker + `web/oauth.py` | `chrome.identity.launchWebAuthFlow` opens our server's existing Google sign-in. The server then redirects to `https://<extension-id>.chromiumapp.org/` with a one-time code, which the extension swaps for a revocable extension token. |
-| Extension API | `web/app.py` | `GET /api/ext/summary` (counts per label per day, last run, recent decisions), `POST /api/ext/sync` (start an incremental run; at most one a minute per account), `GET`/`PUT /api/ext/rules`. Bearer-token auth, CORS limited to the extension's origin. |
-| Near-real-time runs | extension + server | **Phase 1:** when Gmail's inbox changes and the tab is visible, the extension asks the server to sync. The runner already continues from its checkpoint and skips mail it has verified, so a sync costs little when nothing is new. **Phase 2:** Gmail push notifications (`users.watch` + Cloud Pub/Sub) label mail even when no tab is open. |
+| Dashboard bar | `extension/` content script | One element with a closed Shadow DOM, inserted as the first child of `div[role="main"]` (the anchor gmail.js and InboxSDK also use). A `MutationObserver` puts it back when Gmail swaps views; if the anchor disappears, it falls back to a small floating button. Charts are plain SVG built with `createElementNS` and `textContent`, never `innerHTML`, because Gmail enforces Trusted Types. No chart library is needed, and remote code is banned anyway. |
+| Sign-in bridge | `extension/` service worker + `web/oauth.py` | `chrome.identity.launchWebAuthFlow` opens our server's existing Google sign-in. The server then redirects to `https://<extension-id>.chromiumapp.org/` with a one-time code, which the extension swaps (with PKCE) for a short-lived access token and a revocable refresh token. The access token lives in `storage.session`. The refresh token goes in `storage.local`, locked to extension pages with `setAccessLevel(TRUSTED_CONTEXTS)`. The tokens can only read the dashboard and ask for a sync. |
+| Extension API | `web/app.py` | `GET /api/ext/summary` (counts per label per day, last run, recent decisions), `POST /api/ext/sync` (answers `202` at once, starts an incremental run, at most one a minute per account), `GET`/`PUT /api/ext/rules`. Bearer-token auth and CORS limited to `chrome-extension://<id>`. The service worker makes these calls, so the API domain needs no host permission. Avoid tracker-like paths such as `/events`, which Brave's Shields lists have blocked. |
+| Near-real-time runs | extension + server | **Phase 1:** two triggers. The extension nudges the server when the Gmail tab gains focus or the unread count in the title rises, at most once every 30–60 s. The server also checks the History API every 1–2 minutes for each account. A check costs 2 quota units; every minute for 100 users that is about 288,000 units a day, well under 1% of the project's daily allowance. A run (and any Jev spend) starts only when the history shows new inbox mail. **Phase 2:** Gmail push notifications (`users.watch` + Cloud Pub/Sub, renewed daily; effectively free) label mail within seconds. The poll stays as a backstop, because pushes can be late or dropped. |
 | Label colors | `runner.py:ensure_labels` | Create labels with Gmail's `color` field; fix the colors on existing labels once. |
 
 ## Jev through OpenRouter: removing the key step
@@ -128,15 +128,19 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
   - Tier 2 costs about $540–$1,800 a year at the cheapest lab. Budget about two months end to end.
   - Every AI inbox product checked (Shortwave, SaneBox, Fyxer and others) went through this.
 - **Google's AI rule.** Google's user-data policy lets the app send email excerpts to an AI provider only as part of the feature the user asked for, and never to train a general model. Jev over zero-retention OpenRouter fits. Free models that train on prompts do not.
-- **Testing mode is no shortcut.** Leaving the app in *Testing* also caps it at 100 listed users, and every token expires after 7 days.
+- **Testing mode is no shortcut.** Leaving the app in *Testing* also caps it at 100 listed users, and every refresh token expires after 7 days, so background labeling would stop every week. Keep the app published *In production* (unverified), as `docs/hosting.md` already says.
 
 ## Chrome Web Store
 
-- **Publish the beta as *Unlisted*.** Only people with the link can find it, but Google still reviews it like any other listing. Submit early: extensions that can read a site as sensitive as Gmail get a closer look.
-- **Ask for every permission in version 1.** The permissions are `storage`, `identity`, and host access to `mail.google.com` and our API domain. If a later update adds a permission that shows a warning, Chrome disables the extension until each user accepts it.
-- **Install warning.** Users will see *"Read and change your data on mail.google.com"*. The listing and the bar should say plainly that the extension only draws a dashboard, and that labeling happens on the server with the Google permission they approve separately.
-- **The store's 2026 rules.** From 2026-08-01 the store enforces two things. All data collected must be strictly necessary for the extension's single purpose, and it must be disclosed prominently. Fill in the privacy practices form and link the privacy page. The extension itself collects nothing beyond its sign-in token.
-- **Brave** installs extensions from the Chrome Web Store. `launchWebAuthFlow` is used for sign-in because Chrome's other sign-in call, `getAuthToken`, relies on Chrome's own Google-account sign-in, which Brave doesn't have.
+- **Publish the beta as *Unlisted*.** Only people with the link can find it, but it gets the same review as a public listing. Sideloading ("Load unpacked") needs developer mode and gets no automatic updates, so use it only for the first handful of friendly testers.
+- **Submit early.** Google quotes "a few days, up to a few weeks", with extra scrutiny for new developers and for host permissions. An April 2026 backlog produced 28–30-day waits; Google said on 2026-08-20 that times are back to normal.
+- **Ask for every permission in version 1.** The permissions are `storage`, `identity`, and host access to `mail.google.com` only. The service worker reaches our API through CORS, so the API domain stays off the list. If a later update adds a permission that shows a warning, Chrome disables the extension until each user accepts it.
+- **Install warning.** Users will see *"Read and change your data on mail.google.com"*; `storage` and `identity` add no warning. The listing and the bar should say plainly that the extension only draws a dashboard, and that labeling happens on the server with the Google permission they approve separately.
+- **The store's 2026 rules.** From 2026-08-01 the store enforces two things. All data collected must be strictly necessary for the extension's single purpose, and it must be disclosed prominently. Fill in the privacy practices form and link the privacy page. Declare authentication information, and personal communications because the bar shows subjects and senders. The extension stores nothing beyond its sign-in tokens.
+- **Brave** installs extensions from the Chrome Web Store.
+  - `getAuthToken` fails there ("GAIA is unavailable in Brave in any context"), so sign-in uses `launchWebAuthFlow`.
+  - There is no known Brave bug against `launchWebAuthFlow`, but no official statement either. Test it in the first week of Phase 1.
+  - Fallback: a *Connect extension* button on our website that hands the extension a token through `externally_connectable`. Use `sendResponse` plus `return true`, since Brave 1.86 broke Promise-returning handlers.
 
 ## Phases
 
@@ -151,7 +155,8 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
 **Phase 1: the extension MVP (about 2 weeks).**
 
 - `extension/`: Manifest V3 in plain JavaScript with no build step and no dependencies, matching the web app. CI adds `node --check` for its files.
-- Sign-in bridge, `/api/ext/*`, the dashboard bar, and sync when the inbox changes.
+- Week 1: prove `launchWebAuthFlow` sign-in in Brave, and submit a minimal Unlisted build so store review runs alongside development.
+- Sign-in bridge, `/api/ext/*`, the dashboard bar, the nudge and the 1–2-minute History check.
 - Unlisted store listing; tested in Chrome and Brave.
 - **Done when:** 10 friendly users install it and reach a labeled inbox in under 2 minutes (median) without help.
 
@@ -160,7 +165,7 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
 - **Teach it** from the bar: Important, Can wait and Junk buttons on the recent decisions the server already lists. No reading of Gmail's page is needed.
 - **Undo all.** Remove every Inbox Triage label the journal says it added. This is still label-only.
 - **Learn from corrections.** When someone removes or changes one of our labels in Gmail (History API `labelRemoved`), offer a rule. This is roadmap item 2 in [landscape.md](landscape.md).
-- **Gmail push notifications** (`users.watch` + Pub/Sub), so mail is labeled even when no Gmail tab is open.
+- **Gmail push notifications** (`users.watch` + Pub/Sub), so mail is labeled within seconds instead of minutes.
 
 **Phase 3: after the beta.**
 
@@ -185,12 +190,22 @@ The server already records runs, Jev call counts and latency per account. The ex
 
 | Risk | Mitigation |
 |---|---|
-| A Gmail page change breaks where the bar is inserted | Only the bar breaks; labeling runs on the server and keeps working. Anchor to one container, fall back to a small floating button, and ship fixes quickly. |
+| A Gmail page change breaks where the bar is inserted | Only the bar breaks; labeling runs on the server and keeps working. Anchor to one container and fall back to a small floating button. Fixes go through store review, so keep the anchor code small. InboxSDK hit this in September 2026. |
 | The unverified-app warning scares people off | Warn before opening Google. Keep the beta invite-led, with a personal note. |
 | Someone runs up the sponsored AI bill | A capped OpenRouter key, per-account limits, and an endpoint that only triages the signed-in user's mail. It is never a general AI proxy. |
 | OpenRouter changes Jev's price or availability | The base URL and model are settings, so the app can switch back to TypeSafe directly. |
 | Store review is slow or rejects the extension | Minimal permissions, a clear single purpose, a privacy page, and an early submission. |
 | One small server gets busy with minute-by-minute syncs | Runs skip verified mail and allow one sync a minute per account. Watch memory and move up a VM size if needed. |
+
+## Considered: InboxSDK
+
+Streak's [InboxSDK](https://github.com/InboxSDK/InboxSDK) is MIT/Apache-2.0 and actively maintained. It can add a section above the inbox list, but it has costs:
+
+- It is about 2.8 MB.
+- It needs the `scripting` permission and runs code inside Gmail's own page.
+- It sends usage events (including a hash of the user's email) to Streak, which we would have to disclose.
+
+For one bar, our own Shadow DOM element is smaller and simpler. Revisit InboxSDK if the extension later adds per-email badges or compose features.
 
 ## Parked: Chrome's built-in AI
 
@@ -230,8 +245,24 @@ Chrome can download a small Google model (Gemini Nano) onto the user's own compu
 - **CASA pricing:** <https://deepstrike.io/blog/google-casa-security-assessment-2025>
 - **Chrome Web Store:**
   - 2026 policy updates: <https://developer.chrome.com/blog/cws-policy-updates-2026>
+  - Review process: <https://developer.chrome.com/docs/webstore/review-process>
+  - 2026 review times: <https://developer.chrome.com/blog/cws-review-updates-2026>
+  - Distribution: <https://developer.chrome.com/docs/webstore/cws-dashboard-distribution>
   - Limited Use: <https://developer.chrome.com/docs/webstore/program-policies/limited-use>
   - Permission warnings: <https://developer.chrome.com/docs/extensions/develop/concepts/permission-warnings>
+- **Extensions:**
+  - `chrome.identity`: <https://developer.chrome.com/docs/extensions/reference/api/identity>
+  - `chrome.storage`: <https://developer.chrome.com/docs/extensions/reference/api/storage>
+  - Service-worker lifecycle: <https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle>
+  - Trusted Types and extensions: <https://github.com/w3c/trusted-types/wiki/Effects-of-deploying-Trusted-Types-on-browser-extension-developers>
+  - InboxSDK section fix: <https://github.com/InboxSDK/InboxSDK/pull/1322>
+- **Brave:**
+  - `getAuthToken` fails: <https://github.com/firebase/quickstart-js/issues/419> and <https://github.com/brave/brave-browser/issues/38066>
+  - `onMessageExternal` bug: <https://github.com/brave/brave-browser/issues/52126>
+  - Shields blocking an `/events` API path: <https://community.brave.app/t/why-is-brave-shields-blocking-a-get-request-to-my-back-end-api-events-endpoint/547132>
+- **Gmail API:**
+  - Quota: <https://developers.google.com/workspace/gmail/api/reference/quota>
+  - Push notifications: <https://developers.google.com/workspace/gmail/api/guides/push>
 - **Keys leaked from extensions:** <https://www.security.com/threat-intelligence/chrome-extension-credentials>
 - **Chrome's built-in AI:**
   - Prompt API: <https://developer.chrome.com/docs/ai/prompt-api>
