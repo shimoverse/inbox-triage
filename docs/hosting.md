@@ -105,7 +105,18 @@ To take the key step out of onboarding, the server can pay for users' Jev calls,
 
 **What it costs:** Inbox Triage sends about 1,500 tokens per email, and Jev costs $0.042 per million input tokens with output free, so each email costs about $0.00006. For 100 users, each with a 1,000-email first backfill plus 60 new emails a day, that is about **$18 the first month and $11 a month after**, plus OpenRouter's 5.5% fee on credit purchases. Each run's log line includes `jev_cost=` in USD, so you can track spending per run.
 
-## 6. Alternatives if you want zero Google setup
+## 6. The Chrome and Brave extension
+
+The extension ([extension/README.md](../extension/README.md)) draws a live dashboard at the top of Gmail and asks the server to sort new mail as it arrives.
+
+- **Sign-in:** the extension signs in with `chrome.identity.launchWebAuthFlow` against this server's `/connect` page. That works in Chrome and Brave.
+  - The person approves the extension there, and the server hands it a one-time code bound to a PKCE challenge.
+  - The extension swaps the code for a token. The token lasts 90 days, can only read that account's dashboard and ask for a sync, and is revoked by *Disconnect* in the extension or on the website.
+- **List the extension's ID:** a hosted server hands tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS` (comma-separated IDs). Without it, extension sign-in is turned off.
+- **Default schedule:** accounts connected from the extension get an hourly schedule if they don't have one yet, so mail keeps getting labeled between visits.
+- **Syncs cost little:** each account's extension can start at most one sync a minute. A sync continues from the last checkpoint and skips mail it has already labeled, so it costs Jev calls only for new mail.
+
+## 7. Alternatives if you want zero Google setup
 
 - **Google Workspace admins** can skip per-user sign-in with a service account and domain-wide delegation (`inbox-triage --service-account key.json --account …`). See the README.
 - **A Google Apps Script port** would run inside each user's own Google account with only a consent click, and Google hosts it. It's on the roadmap; it trades this app's local privacy model for zero setup.

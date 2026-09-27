@@ -235,7 +235,7 @@ function resumeText(a) {
   return a.resume_at <= Date.now() / 1000 ? "It picks up where it stopped in a moment, on its own."
     : `It picks up where it stopped ${upcoming(a.resume_at)}, on its own.`;
 }
-const TRIGGERS = { schedule: "Scheduled", resume: "Resumed" };
+const TRIGGERS = { schedule: "Scheduled", resume: "Resumed", extension: "From Gmail" };
 
 // A row of role=radio buttons with arrow-key support (a real radio group, drawn as buttons).
 function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = "" }) {
@@ -1042,7 +1042,7 @@ function historyRow(r) {
     : `Didn't finish. ${explainError(r.message || r.error)}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
-    el("span", { class: "badge" + (r.trigger === "schedule" || r.trigger === "resume" ? "" : " manual") }, trigger),
+    el("span", { class: "badge" + (["schedule", "resume", "extension"].includes(r.trigger) ? "" : " manual") }, trigger),
     el("span", { class: "sum" + (ok || paused ? "" : " err-text"), title: ok ? null : r.message || null }, el("span", { class: "m-only" }, trigger + " · "), summary),
     ((ok || paused) && outcomeBar(r.outcomes, true)) || el("span", { class: "bar-slot" }),
     ok ? el("span", { class: "state ok" }, icon("check", 16), r.remaining ? "Done, more left" : "Done")

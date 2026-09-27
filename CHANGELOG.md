@@ -17,6 +17,17 @@
 - **The first run labels straight away.** *Preview first* is still one switch away in setup.
 - **Colour-coded labels.** New Gmail labels get colours that match the app. Labels made by older versions are coloured once, unless someone has already picked a colour.
 - **Pauses say why:** Gmail asked for a break, the day's allowance is used up, or the Jev key is out of credits.
+- **Chrome and Brave extension** (`extension/`, Manifest V3, plain JavaScript). It adds a live dashboard at the top of Gmail:
+  - label chips with 7-day counts, which open the label in Gmail;
+  - a chart of mail labeled per day, with Needs You highlighted, that shows a tooltip on hover or keyboard focus;
+  - recently labeled mail with links to each email.
+
+  When the unread count rises, it asks the server to sort new mail, so labels appear within about a minute while Gmail is open.
+  - **Sign-in:** the extension uses `chrome.identity.launchWebAuthFlow` against the server's new `/connect` page, so it works in Brave too. It gets a one-time, PKCE-bound code and swaps it for a revocable 90-day token (`/api/ext/*`, CORS for extension origins, bearer tokens only).
+  - **No keys:** the extension holds no Google token and no AI key.
+  - **Hosted servers** hand tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS`.
+  - **Default schedule:** accounts connected from the extension get an hourly schedule if they had none.
+  - **Run history** shows runs started from Gmail as *From Gmail*.
 
 ## 0.5.2
 

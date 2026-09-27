@@ -89,6 +89,16 @@ uv run inbox-triage --account you@example.com --dry-run   # preview, no Gmail ch
 uv run inbox-triage --all --days 30                       # backfill 30 days for every account
 ```
 
+## Chrome and Brave extension
+
+`extension/` adds a live Inbox Triage dashboard to the top of Gmail. It shows:
+
+- label chips with 7-day counts, which open the label;
+- a chart of mail labeled per day;
+- what was labeled recently.
+
+It asks the server to sort new mail as it arrives, so labels appear within about a minute while Gmail is open. The extension only draws the dashboard: it holds no Google token and no AI key, and signs in through your server with `launchWebAuthFlow`, which works in both Chrome and Brave. See [extension/README.md](extension/README.md) to load it.
+
 ## The optional notes assistant
 
 Jev decides; it doesn't write. Reading your typed notes and proposing rules is a language task, so it goes to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, which you can change with `INBOX_TRIAGE_ASSIST_MODEL`). It runs only when you click **Turn notes into rules**, and you review every rule before it's saved. On the hosted app the operator provides it. When you run it yourself, add `OPENROUTER_API_KEY` or skip it and tag emails instead. It never classifies email.

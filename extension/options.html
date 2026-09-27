@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Inbox Triage settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/icon48.png" width="32" height="32" alt="">
+      <h1>Inbox Triage</h1>
+    </header>
+    <p class="lead">Shows your Inbox Triage dashboard at the top of Gmail and asks your Inbox Triage server to sort new
+      mail as it arrives. The extension holds no Google or AI keys and never reads, sends or changes mail itself.</p>
+
+    <section aria-labelledby="server-h">
+      <h2 id="server-h">Server</h2>
+      <form id="server-form">
+        <label for="server">Inbox Triage address</label>
+        <div class="row">
+          <input id="server" type="url" placeholder="https://triage.example.com" autocomplete="off" spellcheck="false" required>
+          <button type="submit">Save</button>
+        </div>
+        <p class="help">Use https, or http://127.0.0.1:8765 if you run Inbox Triage on this computer.</p>
+        <p id="server-msg" class="msg" role="status"></p>
+      </form>
+    </section>
+
+    <section aria-labelledby="accounts-h">
+      <h2 id="accounts-h">Connected Gmail accounts</h2>
+      <ul id="accounts"></ul>
+      <p class="help">To connect an account, open Gmail and click <b>Connect Gmail</b> in the Inbox Triage bar.</p>
+    </section>
+  </main>
+  <script src="config.js"></script>
+  <script src="lib.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

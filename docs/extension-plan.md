@@ -1,6 +1,6 @@
 # Plan: Inbox Triage for Chrome and Brave
 
-*September 2026. Phase 0, the server work, is built (0.6.0); the extension is not.*
+*September 2026. Phase 0 (the server work) and the Phase 1 extension MVP are built (0.6.0). What's left in Phase 1 is testing with real users and browsers, and the store listing.*
 
 The goal is for a person to open Gmail, see a live Inbox Triage dashboard across the top of the page, and have new mail labeled automatically. They connect Google once, and nothing else stands between them and a sorted inbox: no Jev key, no Google Cloud setup, and no separate website to learn.
 
@@ -17,17 +17,26 @@ The goal is for a person to open Gmail, see a live Inbox Triage dashboard across
 2. **Open Gmail.** A slim bar appears above the inbox: *Sort my inbox automatically*, with a **Connect Gmail** button.
 3. **Connect Gmail.** A Google window opens and they approve Gmail access. Google's wording is broad, but the app only adds labels. There is no key to paste and no settings page to visit.
 4. **First results within about 30 seconds.** The server labels the last 7 days and the bar fills in live as it goes.
-5. **After that it runs by itself.** New mail is labeled within about two minutes whether or not Gmail is open, and sooner when the bar nudges the server. The labels are ordinary Gmail labels, so they also appear on the phone.
+5. **After that it runs by itself.** While Gmail is open, new mail is labeled within about a minute, because the bar nudges the server when the unread count rises. The rest of the time the server's schedule labels it (hourly by default); Phase 2's Gmail push brings that down to seconds. The labels are ordinary Gmail labels, so they also appear on the phone.
 6. **Teaching comes after the first results.** Once the bar has shown results, it offers *Teach it: mark a few emails Important, Can wait or Junk*. This is the same rules system as today, moved after the first result instead of before it.
 
 The bar, collapsed to one line, can be expanded:
 
 ```
-┌ Inbox Triage ────────────────────────────────────────── Sorted 95 in 11 s · live ● ┐
-│ Needs You 4 ▇▇  Updates 12 ▇▇▇▇  For You 7 ▇▇▇  Later 63 ▇▇▇▇▇▇▇▇▇▇▇▇  Junk 9 ▇▇ │
-│ Last 7 days ▁▂▅▃▂▇▄   Needs You: "Can you sign the lease by Friday?" – Dana        │
-└────────────────────────────────────────────────────────────── Teach it · Settings ┘
+┌ Inbox Triage  Last 7 days [Needs You 10] [Updates 20] [For You 11] [Later 51] [Junk 6]   ● Sorted 5 min ago  ˄ ┐
+│ Labeled per day  ■ Needs You ■ Other labels     │ Recently labeled                                            │
+│  ▇  ▇           ▇                               │ [Needs You] Coach Ray   Field trip form due tomorrow  50 min │
+│  ▇  ▇  ▇  ▇     ▇  ▇                            │ [Updates]   Acme Bank   Your statement is ready         1 h  │
+│  ▄  ▄     ▂  ▇  ▄  ▆    (hover: 13 labeled…)    │ [Later]     Weekly Digest  10 stories you missed        2 h  │
+│ Mon Tue Wed Thu Fri Sat Sun                     │                                                              │
+│ [Sort new mail now] [Rules and schedule] [Extension settings]                                                  │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**As built:**
+- **Label chips instead of a five-colour stacked chart.** The chips copy Gmail's label chips (same colours, name and count as text).
+- **The chart plots Needs You against all other labels.** The web app's five label colours failed the colour-blindness check when stacked side by side: Updates' blue and For You's purple are indistinguishable for deuteranopes and protanopes. Identity is never carried by colour alone.
+- **The Needs You orange and the neutral grey were validated** in light and dark mode.
 
 - **Clicking a bucket opens that Gmail label** (for example `#label/Triage%2FNeeds+You`), so Gmail itself shows the filtered list. The extension never has to redraw Gmail's email list.
 - **Colors match everywhere.** The same bucket colors are set on the Gmail labels (via the Gmail API `color` field), so the bar, the label chips on each row and the phone app all agree.
@@ -64,10 +73,10 @@ flowchart LR
 
 | Piece | Where | What it does |
 |---|---|---|
-| Dashboard bar | `extension/` content script | One element with a closed Shadow DOM, inserted as the first child of `div[role="main"]` (the anchor gmail.js and InboxSDK also use). A `MutationObserver` puts it back when Gmail swaps views; if the anchor disappears, it falls back to a small floating button. Charts are plain SVG built with `createElementNS` and `textContent`, never `innerHTML`, because Gmail enforces Trusted Types. No chart library is needed, and remote code is banned anyway. |
-| Sign-in bridge | `extension/` service worker + `web/oauth.py` | `chrome.identity.launchWebAuthFlow` opens our server's existing Google sign-in. The server then redirects to `https://<extension-id>.chromiumapp.org/` with a one-time code, which the extension swaps (with PKCE) for a short-lived access token and a revocable refresh token. The access token lives in `storage.session`. The refresh token goes in `storage.local`, locked to extension pages with `setAccessLevel(TRUSTED_CONTEXTS)`. The tokens can only read the dashboard and ask for a sync. |
-| Extension API | `web/app.py` | `GET /api/ext/summary` (counts per label per day, last run, recent decisions), `POST /api/ext/sync` (answers `202` at once, starts an incremental run, at most one a minute per account), `GET`/`PUT /api/ext/rules`. Bearer-token auth and CORS limited to `chrome-extension://<id>`. The service worker makes these calls, so the API domain needs no host permission. Avoid tracker-like paths such as `/events`, which Brave's Shields lists have blocked. |
-| Near-real-time runs | extension + server | **Phase 1:** two triggers. The extension nudges the server when the Gmail tab gains focus or the unread count in the title rises, at most once every 30–60 s. The server also checks the History API every 1–2 minutes for each account. A check costs 2 quota units; every minute for 100 users that is about 288,000 units a day, well under 1% of the project's daily allowance. A run (and any Jev spend) starts only when the history shows new inbox mail. **Phase 2:** Gmail push notifications (`users.watch` + Cloud Pub/Sub, renewed daily; effectively free) label mail within seconds. The poll stays as a backstop, because pushes can be late or dropped. |
+| Dashboard bar | `extension/content.js` | One element with a closed Shadow DOM, first child of `div[role="main"]`, re-inserted when Gmail swaps views; a small floating bar if the anchor disappears. Collapsed: label chips with 7-day counts that open the label in Gmail, plus a live status line. Expanded: the per-day chart, recently labeled mail and actions. Charts are plain SVG built with `createElementNS` and `textContent`, never `innerHTML` (Gmail enforces Trusted Types); styles go through `adoptedStyleSheets`. Follows Gmail's light or dark theme. |
+| Sign-in bridge | `extension/background.js` + `web/extension.py` + `/connect` | `chrome.identity.launchWebAuthFlow` opens the server's `/connect` page. The person signs in with Google if needed, then clicks **Connect**. The server redirects to `https://<extension-id>.chromiumapp.org/` with a one-time code bound to a PKCE challenge. The extension swaps it for a revocable 90-day token that can only read the dashboard and ask for a sync. Tokens live in `storage.local`, locked to extension pages where the browser supports it. A hosted server issues tokens only to IDs in `INBOX_TRIAGE_EXTENSION_IDS`. |
+| Extension API | `web/app.py` | `GET /api/ext/summary` (label totals and per-day counts for 7 days in the viewer's time zone, run status, recent decisions with senders and subjects fetched live), `POST /api/ext/sync` (starts an incremental run, at most one a minute per account), `DELETE /api/ext/token`. Bearer tokens only, never cookies, and CORS for extension origins, so the API domain needs no host permission. Rules stay on the website for now. |
+| Near-real-time runs | extension + server | **Phase 1 (built):** the bar nudges the server when the Gmail tab opens or regains focus, and when the unread count in the title rises. The service worker and the server each allow one sync a minute per account. The runner continues from its checkpoint and skips mail it has verified, so a sync spends Jev calls only on new mail. The hourly schedule covers the time Gmail is closed. **Phase 2:** Gmail push notifications (`users.watch` + Cloud Pub/Sub, renewed daily; effectively free) label mail within seconds. They're backed by a History check every 1–2 minutes (2 quota units each, well under 1% of the daily allowance for 100 users), because pushes can be late or dropped. |
 | Label colors | `runner.py:ensure_labels` | Create labels with Gmail's `color` field; fix the colors on existing labels once. |
 
 ## Jev through OpenRouter: removing the key step
@@ -157,12 +166,20 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
 - The onboarding skips "Connect Jev" for sponsored accounts.
 - **Done when:** a new user goes from *Continue with Google* to a labeled inbox without typing anything.
 
-**Phase 1: the extension MVP (about 2 weeks).**
+**Phase 1: the extension MVP. Code built in 0.6.0.**
 
-- `extension/`: Manifest V3 in plain JavaScript with no build step and no dependencies, matching the web app. CI adds `node --check` for its files.
-- Week 1: prove `launchWebAuthFlow` sign-in in Brave, and submit a minimal Unlisted build so store review runs alongside development.
-- Sign-in bridge, `/api/ext/*`, the dashboard bar, the nudge and the 1–2-minute History check.
-- Unlisted store listing; tested in Chrome and Brave.
+- **Built:**
+  - `extension/`: Manifest V3 in plain JavaScript with no build step and no dependencies. CI runs `node --check` on its files and its Node tests.
+  - The sign-in bridge (`/connect` + `/api/ext/*`), the dashboard bar, and the nudge on new mail.
+  - Tested end to end in Chromium: real `launchWebAuthFlow` sign-in, the connect page, CORS, summary and sync, against a stand-in Gmail page.
+- **Changed from the draft:**
+  - **One token.** The extension holds one revocable 90-day token instead of an access token plus a refresh token. Revocation is server-side, so a second token type added nothing.
+  - **The 1–2-minute server History check moved to Phase 2**, alongside Gmail push. Phase 1 relies on the nudge while Gmail is open and the hourly schedule otherwise.
+- **Still to do:**
+  - Check the bar's placement on real Gmail, including dark themes and split view.
+  - Prove `launchWebAuthFlow` sign-in in Brave.
+  - Add a manifest `key` for a stable ID.
+  - Submit an Unlisted build.
 - **Done when:** 10 friendly users install it and reach a labeled inbox in under 2 minutes (median) without help.
 
 **Phase 2: beta polish (about 2 weeks).**
@@ -170,7 +187,7 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
 - **Teach it** from the bar: Important, Can wait and Junk buttons on the recent decisions the server already lists. No reading of Gmail's page is needed.
 - **Undo all.** Remove every Inbox Triage label the journal says it added. This is still label-only.
 - **Learn from corrections.** When someone removes or changes one of our labels in Gmail (History API `labelRemoved`), offer a rule. This is roadmap item 2 in [landscape.md](landscape.md).
-- **Gmail push notifications** (`users.watch` + Pub/Sub), so mail is labeled within seconds instead of minutes.
+- **Gmail push notifications** (`users.watch` + Pub/Sub), so mail is labeled within seconds even with Gmail closed. A History check every 1–2 minutes backs it up, since pushes can be late or dropped.
 
 **Phase 3: after the beta.**
 
