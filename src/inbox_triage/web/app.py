@@ -495,10 +495,12 @@ class App:
         token = default_token(email, self.config_dir)
         if token.exists():
             oauth.revoke(token)
+        # Persist both fences before touching state: stale OAuth callbacks must not
+        # authorize, and a failed removal must not leave a token with empty state.
+        write_private(self.disconnect_fence(email), secrets.token_hex(16))
+        write_private(account_lock_path(self.state_dir, email).with_suffix(".deleted"), "1")
         if directory.exists():
             shutil.rmtree(directory)
-        write_private(account_lock_path(self.state_dir, email).with_suffix(".deleted"), "1")
-        write_private(self.disconnect_fence(email), secrets.token_hex(16))
         if token.exists():
             token.unlink()
         with self.lock:

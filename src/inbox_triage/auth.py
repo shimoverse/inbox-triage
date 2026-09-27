@@ -7,6 +7,8 @@ from pathlib import Path
 
 from .gmail import oauth as google_oauth
 from .gmail.client import write_private
+from .config import STATE_DIR
+from .runner import account_lock, account_lock_path
 
 CONFIG_DIR = Path.home() / ".config/inbox-triage"
 
@@ -57,6 +59,8 @@ def main(argv=None) -> int:
                    help="Token path (default: ~/.config/inbox-triage/tokens/<email>.json, which "
                         "`inbox-triage --account <email>` and `--all` find automatically)")
     p.add_argument("--config-dir", type=Path, default=CONFIG_DIR)
+    p.add_argument("--state-dir", type=Path, default=STATE_DIR,
+                   help="Account state directory (same as inbox-triage --state-dir)")
     p.add_argument("--force", action="store_true", help="Replace an existing token (re-consent)")
     p.add_argument("--no-browser", action="store_true",
                    help="Print the consent URL instead of opening a browser (e.g. over SSH with port forwarding)")
@@ -70,13 +74,15 @@ def main(argv=None) -> int:
     import json
     client = json.loads(credentials_file.read_text(encoding="utf-8"))
     credentials = loopback_consent(client, args.port, open_browser=not args.no_browser)
-    email = google_oauth.profile_email(credentials)
-    output = (args.output or args.config_dir / "tokens" / f"{email.casefold()}.json").expanduser()
-    if output.exists() and not args.force:
-        p.error(f"A token for {email} already exists at {output}; pass --force to replace it")
-    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(output.parent, 0o700)
-    write_private(output, credentials.to_json())
+    email = google_oauth.profile_email(credentials).casefold()
+    output = (args.output or args.config_dir / "tokens" / f"{email}.json").expanduser()
+    with account_lock(account_lock_path(args.state_dir, email)):
+        if output.exists() and not args.force:
+            p.error(f"A token for {email} already exists at {output}; pass --force to replace it")
+        output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(output.parent, 0o700)
+        write_private(output, credentials.to_json())
+        account_lock_path(args.state_dir, email).with_suffix(".deleted").unlink(missing_ok=True)
     print(f"Connected: {email} — token saved locally at {output}")
     return 0
 

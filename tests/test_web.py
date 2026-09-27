@@ -417,9 +417,44 @@ def test_disconnect_failure_keeps_token_and_session_for_retry(app, monkeypatch):
         status, headers, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)
     assert status == 500 and "Set-Cookie" not in headers
     assert acct.jev_key() == "synthetic"
+    assert account_lock_path(app.state_dir, EMAIL).with_suffix(".deleted").exists()
+    assert app.disconnect_fence(EMAIL).exists()
+    assert not app.connected(EMAIL)
     assert (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
     assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)[0] == 200
     assert not acct.dir.exists()
+
+
+@pytest.mark.parametrize("failed_fence", ["generation", "tombstone"])
+def test_disconnect_fence_write_failure_preserves_state_and_can_retry(app, monkeypatch, failed_fence):
+    from inbox_triage.runner import scoped_directory
+    cookie = signed_in(app)
+    acct = Account(app.state_dir, EMAIL)
+    acct.save_jev_key("synthetic")
+    directory = scoped_directory(app.state_dir, EMAIL)
+    token = app.config_dir / "tokens" / f"{EMAIL}.json"
+    marker = account_lock_path(app.state_dir, EMAIL).with_suffix(".deleted")
+    fence = app.disconnect_fence(EMAIL)
+    target = fence if failed_fence == "generation" else marker
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    original = webapp.write_private
+
+    def fail_target(path, text):
+        if path == target:
+            raise OSError("simulated fence persistence failure")
+        return original(path, text)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(webapp, "write_private", fail_target)
+        status, headers, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)
+    assert status == 500 and "Set-Cookie" not in headers
+    assert directory.exists() and acct.jev_key() == "synthetic"
+    assert token.exists()
+    assert not marker.exists()
+    assert fence.exists() == (failed_fence == "tombstone")
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)[0] == 200
+    assert not directory.exists() and not token.exists()
+    assert marker.exists() and fence.exists()
 
 
 def test_disconnect_refuses_active_account_lock(app, monkeypatch):
