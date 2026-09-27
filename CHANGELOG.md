@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0
+
+- **Jev through OpenRouter.** OpenRouter now sells Jev (`jev-latest`: $0.042 per million input tokens, output free) and accepts TypeSafe's request unchanged.
+  - An OpenRouter key (`sk-or-…`) works as a Jev key, with no TypeSafe account.
+  - Without a TypeSafe key, `OPENROUTER_API_KEY` runs both Jev and the notes assistant.
+  - When OpenRouter reports what a call cost, runs record it as `jev_cost`, in USD.
+- **Sponsored free beta: no key to paste.** An operator can pay for users' Jev calls by setting `INBOX_TRIAGE_SPONSORED_JEV_DAILY` to a number of calls per account per day.
+  - Setup drops the *Connect Jev* step, the welcome page shows two steps, and the banner says *No API key needed*.
+  - Users can still bring their own key in Settings; it is then used, with no limit.
+  - Once the day's allowance is used, a run pauses like a Gmail break and carries on after midnight UTC.
+  - A key that is out of credits (HTTP 402) pauses runs for an hour instead of marking emails as failed.
+  - The server checks the sponsored key once at startup and logs the result.
+  - Without the setting, a hosted server still never uses its own key for other people.
+- **The beta limit is checked before Google's consent screen.** Google caps an unverified app at 100 people over its lifetime, counting everyone who approves it. So once the beta is full, *Continue with Google* is turned away before it reaches Google. Returning users enter their address to sign back in. A typed address always goes on to Google, so nobody can use it to check who has an account; anyone who isn't a member is turned away after Google, as before.
+- **The first run labels straight away.** *Preview first* is still one switch away in setup.
+- **Colour-coded labels.** New Gmail labels get colours that match the app. Labels made by older versions are coloured once, unless someone has already picked a colour.
+- **Pauses say why:** Gmail asked for a break, the day's allowance is used up, or the Jev key is out of credits.
+
 ## 0.5.2
 
 - **Gmail rate limits pause a run instead of failing it.** When Gmail says "slow down", the run keeps everything it has done, shows *Paused* (not *Failed*) with the time it carries on, and picks up where it stopped on its own once Gmail's break is over. This follows the time Gmail asks for (`Retry after …`), or waits 15 minutes when Gmail doesn't say. It resumes automatically up to 6 times; clicking Run now never uses those up. A paused preview isn't resumed (it keeps no progress, so it would only repeat the same Jev calls); run it again after the break. While the break lasts, scheduled runs wait too, and the paused run (with its own date range) goes first. After a pause, Run now is set to the same dates (and preview) so it continues the same job, and an open dashboard shows the automatic resume without a reload.

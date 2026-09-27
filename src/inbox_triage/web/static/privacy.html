@@ -39,9 +39,10 @@
     <h2>How it's used and shared</h2>
     <ul>
       <li>For each received email, a short cleaned excerpt (up to 1,000 characters), the subject, the sender's domain
-        and coarse flags are sent to <b>Jev by TypeSafe</b> (typesafe.ai) using <b>your own Jev API key</b>. Jev
-        answers yes/no questions; local rules decide the label. Message IDs, email addresses and attachments are not
-        sent.</li>
+        and coarse flags are sent to <b>Jev by TypeSafe</b> (typesafe.ai), directly or through <b>OpenRouter</b>
+        (openrouter.ai), which passes the request to TypeSafe. This uses your own Jev key or, during a free beta, the
+        operator's key. Jev answers yes/no questions; local rules decide the label. Message IDs, email addresses and
+        attachments are not sent.</li>
       <li>Only if you click “Turn notes into rules”, your typed notes and the sender/subject of the emails shown on
         screen are sent once to an AI model via OpenRouter to propose rules for you to review.</li>
       <li>We do not sell Google user data, use it for advertising, or use it to train AI models. Human access is

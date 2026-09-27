@@ -38,6 +38,8 @@ SESSION_COOKIE = "inbox_triage_session"
 SESSION_TTL = 30 * 86400
 SUMMARY_TTL = 600  # seconds the dashboard reuses a message's sender/subject (memory only, never on disk)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+BETA_FULL = ("The free beta is full. Inbox Triage is open source, so you can run it yourself: "
+             "github.com/shimoverse/inbox-triage")
 
 
 class HTTPError(Exception):
@@ -215,9 +217,20 @@ class App:
         return bool(limit) and len(discover_accounts(self.config_dir)) >= limit
 
     def machine_jev_key(self) -> str:
-        """This computer's Jev key, used only when self-hosting. Hosted servers ignore it:
-        every user must connect their own Jev, so the operator never pays for others."""
-        return "" if self.hosted else config.api_key_for("jev", self.config_dir)
+        """This computer's Jev key, for accounts without their own. A hosted server uses it
+        only in a sponsored beta (INBOX_TRIAGE_SPONSORED_JEV_DAILY), up to that daily limit;
+        otherwise every user connects their own Jev, so the operator never pays by accident."""
+        if self.hosted and not config.sponsored_daily_limit():
+            return ""
+        return config.api_key_for("jev", self.config_dir)
+
+    @property
+    def sponsored(self) -> bool:
+        """A hosted server whose operator pays for users' Jev calls (the free beta)."""
+        return self.hosted and bool(config.sponsored_daily_limit()) and bool(self.machine_jev_key())
+
+    def jev_access(self, acct: Account, settings: dict | None = None) -> config.JevAccess:
+        return config.jev_access(settings, None, self.config_dir, acct.jev_key(), hosted=self.hosted)
 
     def privacy(self):
         """Privacy policy for Google's consent screen; the operator's contact comes from the environment."""
@@ -239,13 +252,15 @@ class App:
             paused = acct.pending_resume()
             accounts.append({"email": email, "connected": email in connected, "settings": settings,
                              "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
+                             "own_jev_key": bool(acct.jev_key()),
                              "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
                              "resume_at": paused["resume_at"] if paused else None,
                              "job": job.__dict__ if job else None,
                              "rules": len(acct.preferences().rules)})
         return {"accounts": accounts, "hosted": self.hosted,
                 "oauth_configured": oauth.client_config(self.config_dir) is not None,
-                "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url()},
+                "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url(),
+                        "sponsored": self.sponsored},
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
                 "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
@@ -255,6 +270,12 @@ class App:
         email = str(body.get("email", "")).strip().casefold()
         if email and not EMAIL_RE.match(email):
             raise HTTPError(400, "Enter a valid email address")
+        if self.beta_full() and not email:
+            # Checked before Google's consent screen: every person who approves an unverified app
+            # uses up one of Google's 100 lifetime sign-ins, even if we turn them away afterwards.
+            # A typed address always goes on to Google (members sign back in that way; the callback
+            # turns anyone else away), so this answer never reveals who has an account here.
+            raise HTTPError(409, BETA_FULL + " Already a member? Choose “Use a specific account” and enter your address.")
         client = oauth.client_config(self.config_dir)
         if client is None:
             raise HTTPError(409, "Google sign-in isn't configured on this server yet")
@@ -290,9 +311,7 @@ class App:
         if self.beta_full() and email not in discover_accounts(self.config_dir):
             # Beta is full: don't keep access to a mailbox we won't serve.
             oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
-            return self.redirect("/#error=" + quote(
-                "The free beta is full. Inbox Triage is open source, so you can run it yourself: "
-                "github.com/shimoverse/inbox-triage"))
+            return self.redirect("/#error=" + quote(BETA_FULL))
         write_private(default_token(email, self.config_dir), credentials.to_json())
         emails = sorted(set(self.session_emails(environ)) | {email})
         return self.redirect(f"/#account={quote(email)}", [("Set-Cookie", self.session_cookie(emails))])
@@ -449,8 +468,7 @@ class App:
         else:
             days = None
         try:
-            config.jev_settings(None, None, self.config_dir, Account(self.state_dir, email).jev_key(),
-                                allow_machine_key=not self.hosted)
+            self.jev_access(Account(self.state_dir, email))
         except config.JevRequired as exc:
             raise HTTPError(409, str(exc)) from None
         with self.lock:
@@ -465,18 +483,18 @@ class App:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
-            model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key(),
-                                             allow_machine_key=not self.hosted)
-            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since, runner_kwargs={
-                "token": default_token(job.account, self.config_dir), "model": model,
-                "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
+            access = self.jev_access(acct, settings)
+            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since,
+                                     jev_daily_limit=access.daily_limit, runner_kwargs={
+                "token": default_token(job.account, self.config_dir), "model": access.model,
+                "api_key": access.key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "paused" if job.result.get("status") == "paused" else "ok"
             result = job.result
             detail = (f" resume_in={max(0, int(result.get('resume_at', 0) - time.time()))}s reason={result.get('reason', '')}"
                       if job.status == "paused" else "")
             _log(f"run {job.status} account={_tag(job.account)} trigger={trigger} processed={result.get('processed', 0)} "
                  f"labeled={result.get('gmail_changes', 0)} jev_calls={result.get('jev_calls', 0)} "
-                 f"slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
+                 f"jev_cost={result.get('jev_cost', 0)} slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
         except Exception as exc:
             job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
             # Google's status and reason code say what went wrong without any mailbox content.
@@ -500,6 +518,18 @@ class App:
             except HTTPError:
                 continue  # already running, or Jev isn't connected
         return started
+
+
+def check_operator_key(key: str) -> bool:
+    """One tiny Jev call at startup, so a wrong or empty sponsored key shows up in the logs
+    before any user's run fails on it."""
+    try:
+        make_provider("jev", api_key=key).verify()
+    except ProviderError as exc:
+        _log(f"sponsored Jev key check failed status={getattr(exc, 'status', '') or 'network'}")
+        return False
+    _log("sponsored Jev key check ok")
+    return True
 
 
 def _tag(email: str) -> str:
@@ -554,8 +584,14 @@ def serve(argv=None) -> int:
     base = args.public_url or f"http://127.0.0.1:{args.port}"
     config.load_dotenv(Path(".env"), args.config_dir / ".env")
     app = App(config_dir=args.config_dir, state_dir=args.state_dir, base_url=base, hosted=bool(args.public_url))
-    if app.hosted and config.api_key_for("jev", args.config_dir):
-        print("Note: hosted mode ignores the server's TYPESAFE_API_KEY; every user connects their own Jev key.")
+    if app.sponsored:
+        limit = config.sponsored_daily_limit()
+        print(f"Sponsored beta: accounts without their own Jev key use this server's key, up to {limit} Jev calls "
+              "per account per day. Cap the key's spending with its provider too.")
+        threading.Thread(target=check_operator_key, args=(app.machine_jev_key(),), daemon=True).start()
+    elif app.hosted and config.api_key_for("jev", args.config_dir):
+        print("Note: hosted mode ignores the server's Jev key; every user connects their own. "
+              "Set INBOX_TRIAGE_SPONSORED_JEV_DAILY to pay for users' Jev calls instead.")
 
     class Server(ThreadingMixIn, WSGIServer):
         daemon_threads = True

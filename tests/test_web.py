@@ -83,7 +83,7 @@ def test_state_and_login_without_oauth_client(app, monkeypatch):
     status, _, state = call(app, "GET", "/api/state", cookie=signed_in(app))
     assert status == 200 and state["oauth_configured"] is False
     assert state["accounts"][0]["email"] == EMAIL and state["accounts"][0]["connected"]
-    assert state["jev"] == {"connected": True, "signup_url": "https://console.typesafe.ai/"}
+    assert state["jev"] == {"connected": True, "signup_url": "https://console.typesafe.ai/", "sponsored": False}
     assert state["assistant"]["available"] is False and state["assistant"]["model"] == "deepseek/deepseek-v4.1-flash"
     assert call(app, "POST", "/api/login", {"email": EMAIL})[0] == 409
     assert call(app, "POST", "/api/oauth-client", {"json": "{}"})[0] == 400
@@ -386,11 +386,14 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     assert 'href="/privacy"' in index and "never sends, deletes" in index
 
 
-def _sign_in_via_callback(app, monkeypatch, email):
+def _start_login(app, monkeypatch, email):
     monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
     monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
     _, _, data = call(app, "POST", "/api/login", {"email": email})
-    state = data["url"].split("state=")[1].split("&")[0]
+    return data["url"].split("state=")[1].split("&")[0]
+
+
+def _finish_login(app, monkeypatch, state, email):
     creds = SimpleNamespace(granted_scopes=[oauth.SCOPE], refresh_token="rt-" + email, token="at",
                             to_json=lambda: '{"refresh_token":"r"}')
     monkeypatch.setattr(oauth, "exchange", lambda *a: creds)
@@ -398,7 +401,11 @@ def _sign_in_via_callback(app, monkeypatch, email):
     return call(app, "GET", f"/oauth/callback?state={state}&code=abc")
 
 
-def test_free_beta_caps_new_accounts_but_not_returning_ones(app, monkeypatch):
+def _sign_in_via_callback(app, monkeypatch, email):
+    return _finish_login(app, monkeypatch, _start_login(app, monkeypatch, email), email)
+
+
+def test_free_beta_turns_new_people_away_before_google(app, monkeypatch):
     revoked = []
     monkeypatch.setattr(oauth, "revoke_token", lambda t: revoked.append(t))
     monkeypatch.setenv("INBOX_TRIAGE_MAX_ACCOUNTS", "2")
@@ -406,12 +413,23 @@ def test_free_beta_caps_new_accounts_but_not_returning_ones(app, monkeypatch):
     beta = call(app, "GET", "/api/state")[2]["beta"]
     # No counts are exposed: just the limit and the end date.
     assert beta == {"enabled": True, "max_accounts": 2, "ends": "2026-10-31", "ended": beta["ended"]}
+    late = _start_login(app, monkeypatch, "late@example.org")  # heads to Google while there's still room
     status, headers, _ = _sign_in_via_callback(app, monkeypatch, "second@example.org")  # fixture has 1 account
     assert headers["Location"].startswith("/#account=") and app.beta_full()
-    # A third person is turned away, and the fresh Google grant is revoked.
+    # "Continue with Google" is refused before Google's consent screen, so none of Google's
+    # 100 lifetime sign-ins for an unverified app is spent on a new person.
+    status, _, data = call(app, "POST", "/api/login", {})
+    assert status == 409 and "beta is full" in data["error"] and "specific account" in data["error"]
+    # A typed address goes on to Google whether or not it has an account here: the answer never
+    # reveals who uses this server. Anyone who isn't a member is turned away after Google.
+    assert call(app, "POST", "/api/login", {"email": "third@example.org"})[0] == 200
+    assert call(app, "POST", "/api/login", {"email": EMAIL})[0] == 200
     status, headers, _ = _sign_in_via_callback(app, monkeypatch, "third@example.org")
     assert "beta%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org"]
-    assert not (app.config_dir / "tokens" / "third@example.org.json").exists()
+    # Someone already at Google when the beta filled is turned away too, and the fresh grant revoked.
+    status, headers, _ = _finish_login(app, monkeypatch, late, "late@example.org")
+    assert "beta%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org", "rt-late@example.org"]
+    assert not (app.config_dir / "tokens" / "late@example.org.json").exists()
     # Existing users can always sign back in.
     status, headers, _ = _sign_in_via_callback(app, monkeypatch, EMAIL)
     assert headers["Location"].startswith("/#account=")
@@ -598,7 +616,7 @@ def test_runner_keeps_the_pinned_window_however_long_the_pauses(tmp_path, monkey
         def profile(self): return {"emailAddress": EMAIL, "historyId": "8"}
     monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
     monkeypatch.setattr(runner, "list_ids", lambda client, query: queries.append(query) or [])
-    monkeypatch.setattr(runner, "ensure_labels", lambda client: {})
+    monkeypatch.setattr(runner, "ensure_labels", lambda client, *extra, **kw: {})
     monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())

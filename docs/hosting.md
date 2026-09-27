@@ -60,9 +60,15 @@ In hosted mode:
 
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
-- **every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** any server-wide `TYPESAFE_API_KEY`, so the operator can never end up paying for other users' Jev usage;
+- **by default, every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** its own Jev key unless you run a [sponsored beta](#5-sponsored-beta-the-operator-pays-for-jev), so the operator never pays for other users by accident;
 - the OAuth client, the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default), and the contact shown on the built-in privacy policy (`INBOX_TRIAGE_SUPPORT_EMAIL`, `INBOX_TRIAGE_OPERATOR`) come from `/etc/inbox-triage/env`;
-- **optional free-beta limits:** `INBOX_TRIAGE_MAX_ACCOUNTS=100` turns away new sign-ups once 100 accounts exist (returning users always get in, and a turned-away user's Google grant is revoked immediately). `INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD` (optional, unset by default) adds an end date to the banner. It's informational: the app keeps running, and you decide what happens next. Counts are never shown to users;
+- **optional free-beta limits:**
+  - `INBOX_TRIAGE_MAX_ACCOUNTS=90`: once 90 accounts exist, *Continue with Google* is turned away before Google's consent screen.
+  - Returning users choose *Use a specific account* and enter their address.
+  - A typed address always goes on to Google, so the server never reveals who has an account. Anyone who isn't a member is turned away after Google, and their fresh grant is revoked straight away.
+  - Keep the limit below 100. Google's cap for an unverified app counts every person who ever approved it, including your own test accounts and anyone turned away by versions before 0.6.
+  - `INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD` (optional, unset by default) adds an end date to the banner. It's informational: the app keeps running, and you decide what happens next.
+  - Counts are never shown to users;
 - the app serves its own home page (`/`) and privacy policy (`/privacy`), so the consent screen can use `https://<domain>/` and `https://<domain>/privacy`;
 - **Disconnect account** revokes Google access and deletes all of that user's stored data;
 - the built-in scheduler runs every account's schedule, so run exactly one instance;
@@ -72,7 +78,34 @@ You are now processing other people's mail: publish a privacy policy, delete dat
 
 **Prefer containers?** A `Dockerfile` is included as an alternative: mount `/data`, pass the same environment variables, add `--public-url https://…`, and put any TLS proxy in front of port 8765.
 
-## 5. Alternatives if you want zero Google setup
+## 5. Sponsored beta: the operator pays for Jev
+
+To take the key step out of onboarding, the server can pay for users' Jev calls, up to a daily limit per account. Jev is sold on OpenRouter, so one OpenRouter key is enough.
+
+1. **Create an OpenRouter key for this server only.** In its settings, set a **credit limit** with a monthly reset (for example $50). It is the circuit breaker if anything goes wrong.
+2. **Turn on zero data retention** for the OpenRouter account (Settings → Privacy), so no provider keeps users' email excerpts.
+3. **Add both settings** to `/etc/inbox-triage/env`, then restart:
+   ```bash
+   OPENROUTER_API_KEY=sk-or-v1-…
+   INBOX_TRIAGE_SPONSORED_JEV_DAILY=500   # Jev calls per account per day (UTC)
+   ```
+4. **Check the log.** `journalctl -u inbox-triage` should show `sponsored Jev key check ok`. On `failed status=401` the key is wrong; on `failed status=402` it has no credits.
+
+**What changes for users:**
+
+- The *Connect Jev* step disappears, and the banner says *No API key needed*.
+- A user can still bring their own key in Settings. Their calls then go on their key, with no limit.
+- The first run labels the last 7 days straight away.
+
+**When a limit is hit, runs pause instead of failing**, the same way they pause for Gmail:
+
+- **Daily allowance used up:** the account carries on after midnight UTC.
+- **Key out of credits** (OpenRouter's `402`, which is also what a key at its credit limit returns): each account tries again an hour later, up to six times, and after that at its next schedule or when someone clicks Run now.
+- The dashboard says which of these happened.
+
+**What it costs:** Inbox Triage sends about 1,500 tokens per email, and Jev costs $0.042 per million input tokens with output free, so each email costs about $0.00006. For 100 users, each with a 1,000-email first backfill plus 60 new emails a day, that is about **$18 the first month and $11 a month after**, plus OpenRouter's 5.5% fee on credit purchases. Each run's log line includes `jev_cost=` in USD, so you can track spending per run.
+
+## 6. Alternatives if you want zero Google setup
 
 - **Google Workspace admins** can skip per-user sign-in with a service account and domain-wide delegation (`inbox-triage --service-account key.json --account …`). See the README.
 - **A Google Apps Script port** would run inside each user's own Google account with only a consent click, and Google hosts it. It's on the roadmap; it trades this app's local privacy model for zero setup.

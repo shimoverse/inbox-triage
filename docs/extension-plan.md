@@ -1,6 +1,6 @@
 # Plan: Inbox Triage for Chrome and Brave
 
-*Proposal, September 2026. Nothing here is built yet.*
+*September 2026. Phase 0, the server work, is built (0.6.0); the extension is not.*
 
 The goal is for a person to open Gmail, see a live Inbox Triage dashboard across the top of the page, and have new mail labeled automatically. They connect Google once, and nothing else stands between them and a sorted inbox: no Jev key, no Google Cloud setup, and no separate website to learn.
 
@@ -74,7 +74,7 @@ flowchart LR
 
 **The belief is mostly right. It isn't free, but it is extremely cheap.** OpenRouter now sells Jev directly, and nobody needs a TypeSafe account (checked against OpenRouter's live model list on 2026-09-27):
 
-- **Models:** `typesafe/jev-1.13`, or the alias `~typesafe/jev-latest`. Context is 32k tokens.
+- **Models:** `typesafe/jev-1.13`, or the alias `~typesafe/jev-latest`. Context is 32k tokens. OpenRouter's TypeSafe SDK guide says the app's existing model name, `jev-latest`, works unchanged.
 - **Price:** $0.042 per million *input* tokens. Output is free.
 - **Endpoint:** `POST https://openrouter.ai/api/v1/systemone` accepts TypeSafe's request shape and is authenticated with an OpenRouter key.
 - **Per email:** Inbox Triage sends about 1,500 tokens (the nine questions plus a trimmed excerpt). That works out to about **$0.00006 per email**, or roughly 16,000 emails per dollar.
@@ -94,20 +94,25 @@ Add 5.5% for OpenRouter's fee on credit purchases. A $50 monthly cap leaves more
 - **Rate limits.** The limits (20 requests a minute; 50 a day, or 1,000 with $10 of credit) apply to the whole account, so all 100 users would share them.
 - **Privacy.** Many free endpoints may train on prompts or publish them. Sending someone's email there would break Google's user-data policy.
 
-### The server change
+### The server change (built in 0.6.0)
 
-The existing Jev client posts to `{base}/v1/systemone`, so pointing it at OpenRouter is configuration plus one policy switch:
+The existing Jev client posts to `{base}/v1/systemone`, which OpenRouter accepts with the same request and answer shapes. So the change is mostly a policy switch:
 
-1. **Point Jev at OpenRouter.** Set `TYPESAFE_API_BASE=https://openrouter.ai/api` and `INBOX_TRIAGE_JEV_MODEL=~typesafe/jev-latest`. Confirm the response shape with one real call before relying on it.
-2. **Add a sponsored mode.** For example, `INBOX_TRIAGE_SPONSORED_JEV=1`: when it is set, a hosted server may use the operator's key for accounts that haven't connected their own. Today the hosted server deliberately refuses to (`config.jev_settings(allow_machine_key=False)`). That rule was there so the operator could never pay by accident; sponsoring is a deliberate choice, so it gets its own switch and limits. The "Connect Jev" step disappears for sponsored users; bringing your own key stays available for later.
-3. **Guard the budget.**
-   - Use an OpenRouter key made for this server with a USD `limit` and a monthly reset. It acts as a circuit breaker.
-   - Per account, cap usage at about 2,000 emails for the backfill and 300 a day after that. The runner already counts Jev calls per run.
-   - Turn on OpenRouter's account-wide zero data retention. Jev's endpoint is on OpenRouter's zero-retention list.
-   - When a cap is hit, the account pauses with a clear message instead of failing.
-4. **Update the docs.** Update the README, `docs/hosting.md` and the privacy page: name OpenRouter as a processor and describe what it receives (the same trimmed evidence as today).
+1. **Jev goes to OpenRouter automatically.**
+   - An OpenRouter key (`sk-or-…`) routes to `https://openrouter.ai/api`; any other key goes to TypeSafe. An explicit `TYPESAFE_API_BASE` still wins.
+   - With no TypeSafe key, `OPENROUTER_API_KEY` runs Jev as well as the notes assistant.
+2. **Sponsored mode: `INBOX_TRIAGE_SPONSORED_JEV_DAILY=<calls per account per day>`.**
+   - When set, a hosted server may use its own key for accounts that haven't connected theirs, up to that many Jev calls a day (UTC). Without it, the hosted server still refuses to, so the operator never pays by accident.
+   - The "Connect Jev" step disappears. Bringing your own key stays available in Settings, and a user's own key has no limit.
+   - One number sets both the switch and the limit. 500 fits a typical 7-day first run; a bigger backfill carries on after midnight UTC.
+3. **The budget is guarded in three layers.**
+   - **Per account:** the daily allowance above. Past it, the run pauses like a Gmail break (nothing is lost) and resumes after midnight UTC.
+   - **Per key:** OpenRouter's own credit limit on a key made for this server. When it's hit, OpenRouter answers `402`, and runs pause for an hour instead of marking emails as failed.
+   - **Privacy:** turn on OpenRouter's account-wide zero data retention. Jev's endpoint is on OpenRouter's zero-retention list.
+   - A startup check logs whether the sponsored key works, and every run logs its `jev_cost`.
+4. **Docs.** The README, `docs/hosting.md` (a new "Sponsored beta" section), `.env.example` and the privacy page now name OpenRouter and say what it receives: the same trimmed evidence as before.
 
-This keeps "every per-email decision is a Jev answer" (CONTRIBUTING.md) intact; only the route to Jev changes. Phase 0 below ships this to the existing website before the extension exists, so the website loses its Jev step right away.
+This keeps "every per-email decision is a Jev answer" (CONTRIBUTING.md) intact; only the route to Jev changes.
 
 ### Keys never go in the extension
 
@@ -144,7 +149,7 @@ A Chrome extension is a zip file, and its code sits in plain text on disk. Exten
 
 ## Phases
 
-**Phase 0: the website loses its key step (about 3 days).** This ships before any extension work.
+**Phase 0: the website loses its key step. Built in 0.6.0.** This ships before any extension work. What's left is the operator's part: create the capped OpenRouter key, turn on zero data retention, and set the two variables (`docs/hosting.md`, section 5).
 
 - Jev through OpenRouter, sponsored mode, budget caps and zero retention, as described above.
 - A beta check before Google consent, with the limit set to about 90.

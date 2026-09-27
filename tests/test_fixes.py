@@ -125,7 +125,7 @@ def live_setup(monkeypatch, ids, provider, fetch=None):
         def attachment_data(self, mid, aid): return ""
     monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
     monkeypatch.setattr(runner, "list_ids", lambda client, query: list(ids))
-    monkeypatch.setattr(runner, "ensure_labels", lambda client: {n: n for n in runner.LABELS})
+    monkeypatch.setattr(runner, "ensure_labels", lambda client, *extra, **kw: {n: n for n in runner.LABELS})
     monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: provider)
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: context.ContextSyncStats())
