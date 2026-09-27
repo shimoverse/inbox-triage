@@ -20,7 +20,7 @@ The extension only draws the dashboard; the server does all the reading and labe
 2. Load the extension:
    - **Chrome:** open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose this `extension` folder.
    - **Brave:** open `brave://extensions` and do the same.
-3. Set the server address. Click the extension's icon to open its settings. The default is `http://127.0.0.1:8765`; a hosted server uses its `https://` address.
+3. Check the server address. The extension points at the hosted beta, `https://triage.shimoverse.com`, by default. If you run your own server, click the extension's icon to open its settings and enter its address: `http://127.0.0.1:8765` on this computer, or your server's `https://` address.
 4. Open Gmail and click **Connect Gmail** in the Inbox Triage bar.
    - A window opens on your server's connect page.
    - Sign in with Google if you aren't already, then click **Connect**.
