@@ -102,3 +102,68 @@ def test_cli_reauthorization_does_not_clear_other_accounts_tombstone(tmp_path, m
     other.write_text("1")
     assert auth.main(args) == 0
     assert other.read_text() == "1"
+
+
+def test_cli_consent_started_before_disconnect_cannot_reconnect(tmp_path, monkeypatch):
+    from inbox_triage.web import oauth
+    config, state, args = _args(tmp_path)
+    _consent(monkeypatch)
+    consent = auth.loopback_consent
+    marker = runner.account_lock_path(state, EMAIL).with_suffix(".deleted")
+    fence = config / "disconnect-fences" / (runner.scoped_directory(state, EMAIL).name + ".json")
+    revoked = []
+    monkeypatch.setattr(oauth, "revoke_token", lambda token: revoked.append(token))
+
+    def delete_during_consent(*a, **kw):
+        fence.parent.mkdir(parents=True)
+        fence.write_text("new-generation")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1")
+        return consent(*a, **kw)
+
+    monkeypatch.setattr(auth, "loopback_consent", delete_during_consent)
+    with pytest.raises(SystemExit, match="disconnected during sign-in"):
+        auth.main(args)
+    assert marker.read_text() == "1"
+    assert not runner.default_token(EMAIL, config).exists()
+    assert revoked == [""]  # synthetic credentials have no real Google token
+
+
+def test_cli_reconnect_after_disconnect_generation_is_allowed(tmp_path, monkeypatch):
+    config, state, args = _args(tmp_path)
+    _consent(monkeypatch)
+    marker = runner.account_lock_path(state, EMAIL).with_suffix(".deleted")
+    fence = config / "disconnect-fences" / (runner.scoped_directory(state, EMAIL).name + ".json")
+    fence.parent.mkdir(parents=True)
+    fence.write_text("previous-deletion")
+    marker.parent.mkdir(parents=True)
+    marker.write_text("1")
+    assert auth.main(args) == 0
+    assert not marker.exists()
+    assert fence.read_text() == "previous-deletion"
+
+
+def test_cli_quoted_home_paths_still_detect_disconnect_during_consent(tmp_path, monkeypatch):
+    from inbox_triage.web import oauth
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config, state, _ = _args(tmp_path)
+    _consent(monkeypatch)
+    original = auth.loopback_consent
+    fence = config / "disconnect-fences" / (runner.scoped_directory(state, EMAIL).name + ".json")
+    marker = runner.account_lock_path(state, EMAIL).with_suffix(".deleted")
+    monkeypatch.setattr(oauth, "revoke_token", lambda token: None)
+
+    def delete_during_consent(*args, **kwargs):
+        fence.parent.mkdir(parents=True)
+        fence.write_text("new-generation")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(auth, "loopback_consent", delete_during_consent)
+    args = ["--credentials", str(config / "client_secret.json"),
+            "--config-dir", "~/config", "--state-dir", "~/state"]
+    with pytest.raises(SystemExit, match="disconnected during sign-in"):
+        auth.main(args)
+    assert marker.exists()
+    assert not runner.default_token(EMAIL, config).exists()

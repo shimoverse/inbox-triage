@@ -8,7 +8,7 @@ from pathlib import Path
 from .gmail import oauth as google_oauth
 from .gmail.client import write_private
 from .config import STATE_DIR
-from .runner import account_lock, account_lock_path
+from .runner import account_lock, account_lock_path, scoped_directory
 
 CONFIG_DIR = Path.home() / ".config/inbox-triage"
 
@@ -66,6 +66,8 @@ def main(argv=None) -> int:
                    help="Print the consent URL instead of opening a browser (e.g. over SSH with port forwarding)")
     p.add_argument("--port", type=int, default=0, help="Local redirect port (default: any free port)")
     args = p.parse_args(argv)
+    args.config_dir = args.config_dir.expanduser()
+    args.state_dir = args.state_dir.expanduser()
     credentials_file = args.credentials.expanduser()
     if not credentials_file.exists():
         p.error(f"OAuth client JSON not found at {credentials_file}; see the README 'Google Cloud setup' section")
@@ -73,10 +75,19 @@ def main(argv=None) -> int:
         p.error("Token file already exists; pass --force to replace it")
     import json
     client = json.loads(credentials_file.read_text(encoding="utf-8"))
+    # The account is unknown until consent completes. Snapshot every disconnect
+    # generation so a deletion during that wait cannot be undone by this login.
+    fences_dir = args.config_dir / "disconnect-fences"
+    fences = {path.name: path.read_text() for path in fences_dir.glob("*.json")}
     credentials = loopback_consent(client, args.port, open_browser=not args.no_browser)
     email = google_oauth.profile_email(credentials).casefold()
     output = (args.output or args.config_dir / "tokens" / f"{email}.json").expanduser()
     with account_lock(account_lock_path(args.state_dir, email)):
+        fence = fences_dir / (scoped_directory(args.state_dir, email).name + ".json")
+        if fences.get(fence.name) != (fence.read_text() if fence.exists() else None):
+            from .web.oauth import revoke_token
+            revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
+            raise SystemExit("Account was disconnected during sign-in; start again")
         if output.exists() and not args.force:
             p.error(f"A token for {email} already exists at {output}; pass --force to replace it")
         output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
