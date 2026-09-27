@@ -468,9 +468,13 @@ class GmailClient:
     def labels(self) -> list[dict]:
         return list(self._request("GET", "/labels").get("labels", ()))
 
-    def create_label(self, name: str) -> dict:
-        return self._request("POST", "/labels", body={"name": name, "labelListVisibility": "labelShow",
-                                                     "messageListVisibility": "show"})
+    def create_label(self, name: str, color: dict | None = None) -> dict:
+        body = {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
+        return self._request("POST", "/labels", body={**body, **({"color": color} if color else {})})
+
+    def color_label(self, label_id: str, color: dict) -> dict:
+        """Set one of the app's own labels' colour (Gmail's fixed palette); nothing else changes."""
+        return self._request("PATCH", f"/labels/{urllib.parse.quote(label_id)}", body={"color": color})
 
     def message_labels(self, message_id: str) -> set[str]:
         raw = self._request("GET", f"/messages/{urllib.parse.quote(message_id)}", {"format": "minimal"})

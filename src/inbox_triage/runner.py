@@ -10,6 +10,7 @@ import os
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import preferences
@@ -31,15 +32,37 @@ ATTENTION = {"needs_you": "Triage/Needs You", "updates": "Triage/Updates",
              "for_you": "Triage/For You", "later": "Triage/Later", "junk": JUNK_LABEL}
 TOPICS = {"shopping": "Topics/Shopping"}
 LABELS = tuple(ATTENTION.values()) + tuple(TOPICS.values())
+# (background, text) from Gmail's fixed label palette, matching the web app's colours.
+LABEL_COLORS = {"Triage/Needs You": ("#ffc8af", "#7a2e0b"), "Triage/Updates": ("#c9daf8", "#1c4587"),
+                "Triage/For You": ("#e4d7f5", "#41236d"), "Triage/Later": ("#e7e7e7", "#464646"),
+                "Triage/Junk": ("#f2b2a8", "#8a1c0a"), "Topics/Shopping": ("#98d7e4", "#0d3b44")}
 EXCLUDED = {"SENT", "DRAFT", "SPAM", "TRASH"}
 MAX_PER_RUN = 100
 MAX_ATTEMPTS = 3            # a message that fails this often is left unchanged for good
 MAX_CONSECUTIVE_FAILURES = 5  # this many in a row means the provider is down: stop the run
 MAX_WINDOW_DAYS = 90
 JOURNAL_RETENTION = (MAX_WINDOW_DAYS + 5) * 86400
+CREDITS_RETRY = 3600  # seconds before trying again when the Jev key is out of credits
 from .config import CONFIG_DIR, STATE_DIR  # noqa: E402
 # Kept as a module attribute so tests can substitute a fake client.
 GmailReadOnlyClient = GmailClient
+
+
+@dataclass(frozen=True)
+class JevBudget:
+    """How many Jev calls a batch may make, and when that allowance refills (a sponsored daily limit)."""
+    calls: int
+    resets_at: int
+
+
+class JevPaused(Exception):
+    """Jev can't be paid for right now: today's sponsored allowance is used up, or the key is
+    out of credits. Like a Gmail break, the run stops, keeps its work, and carries on later."""
+    status = 402
+
+    def __init__(self, reason: str, retry_at: float, message: str):
+        super().__init__(message)
+        self.reason, self.retry_at = reason, retry_at
 
 
 def default_token(account: str, config_dir: Path = CONFIG_DIR) -> Path:
@@ -123,21 +146,42 @@ def account_lock(path: Path):
         yield
 
 
-def ensure_labels(client: GmailClient, *extra: str) -> dict[str, str]:
+def label_color(name: str) -> dict | None:
+    colors = LABEL_COLORS.get(name)
+    return {"backgroundColor": colors[0], "textColor": colors[1]} if colors else None
+
+
+def ensure_labels(client: GmailClient, *extra: str, recolor: bool = False) -> dict[str, str]:
     """Create the standard labels (and ``extra`` ones, e.g. Junk once someone has a Junk rule);
-    return every Inbox Triage label that exists, so stale ones can still be removed."""
-    def current() -> dict[str, str]:
+    return every Inbox Triage label that exists, so stale ones can still be removed. New labels
+    get their colour; ``recolor`` also colours ones made before labels had colours, unless
+    someone has already picked a colour for them."""
+    def current() -> dict[str, dict]:
         # Gmail label names are case-insensitive; match an existing "triage/later" too.
-        return {x["name"].casefold(): x["id"] for x in client.labels()}
+        return {x["name"].casefold(): x for x in client.labels()}
     required = [name for name in LABELS if name != JUNK_LABEL] + list(extra)
     before = current()
     for name in required:
         if name.casefold() not in before:
-            client.create_label(name)
+            try:
+                client.create_label(name, color=label_color(name))
+            except GmailError as exc:
+                if exc.status != 400:
+                    raise
+                client.create_label(name)  # colour is cosmetic: one Gmail won't take never blocks labeling
     after = current()
     if not all(name.casefold() in after for name in required):
         raise RuntimeError("Gmail label creation readback failed")
-    return {name: after[name.casefold()] for name in LABELS if name.casefold() in after}
+    if recolor:
+        for name in LABELS:
+            label = after.get(name.casefold())
+            if label and not label.get("color"):
+                try:
+                    client.color_label(label["id"], label_color(name))
+                except GmailError as exc:
+                    if exc.status != 400:
+                        raise
+    return {name: after[name.casefold()]["id"] for name in LABELS if name.casefold() in after}
 
 
 def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[str, str]) -> bool:
@@ -168,10 +212,11 @@ def desired_names(decision) -> set[str]:
 def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_messages: int = MAX_PER_RUN,
         dry_run: bool = False, now: int | None = None, provider: str = "jev", model: str | None = None,
         service_account: Path | None = None, since_days: int | None = None, api_key: str | None = None,
-        since: int | None = None) -> dict:
+        since: int | None = None, jev_budget: JevBudget | None = None) -> dict:
     """Triage one batch. ``since_days`` rescans that many past days (skipping verified mail)
     instead of continuing from the checkpoint; ``since`` pins where that window starts (epoch
-    seconds), so every batch and resume of one rescan covers the same mail."""
+    seconds), so every batch and resume of one rescan covers the same mail. ``jev_budget``
+    caps the Jev calls this batch may make; past it, the batch pauses until the budget refills."""
     if not 1 <= max_messages <= MAX_PER_RUN:
         raise ValueError("max_messages must be between 1 and 100")
     if since_days is not None and not 1 <= since_days <= MAX_WINDOW_DAYS:
@@ -185,7 +230,7 @@ def run(account: str, token: Path | None = None, root: Path = STATE_DIR, *, max_
     os.chmod(directory, 0o700)
     with account_lock(directory / ".lock"):
         return _run_locked(account, token, directory, max_messages, dry_run, now, provider, model, service_account,
-                           since_days, api_key, since)
+                           since_days, api_key, since, jev_budget)
 
 
 def _client(token: Path | None, account: str, service_account: Path | None):
@@ -197,7 +242,7 @@ def _client(token: Path | None, account: str, service_account: Path | None):
 def _run_locked(account: str, token: Path | None, directory: Path, max_messages: int,
                 dry_run: bool, now: int, provider_name: str = "jev", model: str | None = None,
                 service_account: Path | None = None, since_days: int | None = None,
-                api_key: str | None = None, since: int | None = None) -> dict:
+                api_key: str | None = None, since: int | None = None, jev_budget: JevBudget | None = None) -> dict:
     client = _client(token, account, service_account)
     throttle = getattr(client, "throttle", None)
     pushbacks = getattr(throttle, "pushbacks", 0)
@@ -206,7 +251,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
     consecutive = 0
     jev_seconds = 0.0
     complete = True
-    paused: RateLimited | None = None
+    paused: RateLimited | JevPaused | None = None
     events: dict[str, dict] = {}
     journal = directory / "events.jsonl"
 
@@ -220,6 +265,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
         return {"account": account, "mode": "dry-run" if dry_run else "label-only", "provider": provider_name,
                 "processed": seen, "outcomes": dict(sorted(outcomes.items())), "model_calls": calls,
                 "jev_calls": calls, "jev_ms": round(jev_seconds * 1000), "provider_failures": failures,
+                "jev_cost": round(float(tokens.get("cost", 0)), 6),
                 "tokens": dict(tokens), "frontier_calls": 0, "gmail_changes": changed,
                 "gmail_slowdowns": getattr(throttle, "pushbacks", 0) - pushbacks,
                 "remaining": not complete, "cursor_advanced": complete and not dry_run}
@@ -241,7 +287,8 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
         ids = list_ids(client, scan_query(int(state["cursor_epoch"]), int(state["launch_epoch"]), since))
         prefs = preferences.load(directory / "preferences.json")
         junk = (JUNK_LABEL,) if any(rule.action == "junk" for rule in prefs.rules) else ()
-        labels = None if dry_run else ensure_labels(client, *junk)
+        labels = None if dry_run else ensure_labels(client, *junk, recolor=not state.get("labels_colored"))
+        state["labels_colored"] = state.get("labels_colored") or not dry_run
         provider = make_provider(provider_name, model, api_key=api_key)
 
         with TriageStore(directory / "context.db") as store:
@@ -278,6 +325,10 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                         proposed = {"id": mid, "status": "classified", "destination": junked.destination.value,
                                     "names": sorted(desired_names(junked))}
                     else:
+                        if jev_budget is not None and calls + failures >= jev_budget.calls:
+                            seen -= 1  # not checked yet: the next run starts with it
+                            raise JevPaused("sponsored_limit", jev_budget.resets_at,
+                                            "Today's free sorting allowance for this account is used up")
                         context = build_context(store, account, evidence, now=now,
                                                 priorities_path=directory / "priorities.json")
                         if prefs.summary:
@@ -286,7 +337,12 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                             started = time.perf_counter()
                             signals, usage = provider.classify_with_usage(evidence, context)
                             jev_seconds += time.perf_counter() - started
-                        except ProviderError:
+                        except ProviderError as exc:
+                            if getattr(exc, "status", None) == 402:
+                                # Out of credits (or at the key's spending limit): not this email's fault.
+                                seen -= 1
+                                raise JevPaused("jev_credits", now + CREDITS_RETRY,
+                                                "The Jev key is out of credits") from None
                             # One malformed answer must not wedge the account: retry on later
                             # runs, then give up and leave the message unchanged.
                             failures += 1
@@ -316,9 +372,9 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                     changed += int(apply_labels(client, mid, set(previous["names"]), labels))
                     record({**previous, "status": "verified"})
                 outcomes[previous["destination"]] += 1
-    except RateLimited as exc:
-        # Gmail asked for a break. Everything done so far is saved (the journal skips it next
-        # time), so stop here and let the caller come back when Gmail says.
+    except (RateLimited, JevPaused) as exc:
+        # Gmail asked for a break, or Jev can't be paid for right now. Everything done so far is
+        # saved (the journal skips it next time), so stop here and let the caller come back later.
         complete, paused = False, exc
     except Exception as exc:
         exc.partial = summary()  # the run history still counts what this batch did before it stopped
@@ -336,7 +392,7 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
 
 def main(argv=None) -> int:
     from .accounts import Account, run_account
-    from .config import CONFIG_DIR as _cfg, JevRequired, jev_settings, load_dotenv
+    from .config import CONFIG_DIR as _cfg, JevRequired, jev_access, load_dotenv
     load_dotenv(Path(".env"), _cfg / ".env")
     parser = argparse.ArgumentParser(description="Private Gmail triage powered by Jev; label-only unless --dry-run")
     who = parser.add_mutually_exclusive_group(required=True)
@@ -377,11 +433,12 @@ def main(argv=None) -> int:
                     days, since, dry_run = paused.get("days"), paused.get("since"), args.dry_run or paused.get("mode") == "dry-run"
             if token is not None and not token.expanduser().exists():
                 raise FileNotFoundError(f"No token at {token}; run inbox-triage-auth")
-            model, api_key = jev_settings(settings, args.model, args.config_dir, acct.jev_key())
+            access = jev_access(settings, args.model, args.config_dir, acct.jev_key())
             result = run_account(account, args.state_dir, trigger=trigger, days=days, since=since,
+                                 jev_daily_limit=access.daily_limit,
                                  runner_kwargs={"token": token, "max_messages": args.max,
                                                 "dry_run": dry_run or bool(settings.get("dry_run")),
-                                                "model": model, "api_key": api_key,
+                                                "model": access.model, "api_key": access.key,
                                                 "service_account": args.service_account})
             print(json.dumps(result, sort_keys=True))
         except Exception as exc:

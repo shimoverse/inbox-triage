@@ -88,7 +88,7 @@ def test_live_runner_verifies_account_and_resumes_without_new_model_call(tmp_pat
             return JevSignals(personal_relevance=.99), {"input_tokens": 10, "output_tokens": 2}
     monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
     monkeypatch.setattr(runner, "list_ids", lambda client, query: ["synthetic-id"])
-    monkeypatch.setattr(runner, "ensure_labels", lambda client: {name: "custom1" if name == "Triage/For You" else name for name in runner.LABELS})
+    monkeypatch.setattr(runner, "ensure_labels", lambda client, *extra, **kw: {name: "custom1" if name == "Triage/For You" else name for name in runner.LABELS})
     monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: Provider())
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())
@@ -121,7 +121,8 @@ def test_junk_rule_labels_without_asking_jev_but_never_security_alerts(tmp_path,
             return {"id": mid, "payload": {"mimeType": "text/plain", "headers": [{"name": "Subject", "value": subjects[mid]}]}}
         def attachment_data(self, mid, aid): return ""
         def labels(self): return [{"id": n, "name": n} for n in created]
-        def create_label(self, name): created.append(name)
+        def create_label(self, name, color=None): created.append(name)
+        def color_label(self, label_id, color): pass
         def message_labels(self, mid): return set(applied.get(mid, ()))
         def modify_labels(self, mid, add, remove): applied.setdefault(mid, set()).update(add)
     asked = []
@@ -145,7 +146,8 @@ def test_junk_rule_labels_without_asking_jev_but_never_security_alerts(tmp_path,
 
 def test_junk_label_is_only_created_when_someone_uses_it():
     created = []
-    client = SimpleNamespace(labels=lambda: [{"id": n, "name": n} for n in created], create_label=created.append)
+    client = SimpleNamespace(labels=lambda: [{"id": n, "name": n} for n in created],
+                             create_label=lambda name, color=None: created.append(name))
     labels = runner.ensure_labels(client)
     assert "Triage/Junk" not in created and "Triage/Junk" not in labels
     assert "Triage/Junk" in runner.ensure_labels(client, "Triage/Junk")
@@ -186,7 +188,7 @@ def test_gmail_throttling_pauses_the_batch_and_keeps_its_progress(tmp_path, monk
             return JevSignals(personal_relevance=.99), {}
     monkeypatch.setattr(runner, "GmailReadOnlyClient", Client)
     monkeypatch.setattr(runner, "list_ids", lambda client, query: ["m1", "m2", "m3", "m4"])
-    monkeypatch.setattr(runner, "ensure_labels", lambda client: {n: n for n in runner.LABELS})
+    monkeypatch.setattr(runner, "ensure_labels", lambda client, *extra, **kw: {n: n for n in runner.LABELS})
     monkeypatch.setattr(runner, "make_provider", lambda *a, **kw: Provider())
     monkeypatch.setattr(runner, "bootstrap_context", lambda *a, **kw: None)
     monkeypatch.setattr(runner, "sync_incremental", lambda *a, **kw: ContextSyncStats())

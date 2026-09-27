@@ -218,6 +218,16 @@ function problem(lead, raw) {
   const text = explainError(raw);
   return el("div", { class: "notice err wide" }, el("p", {}, lead, text), techDetails(raw, text));
 }
+// Why a run paused: Gmail asked for a break, or Jev couldn't be paid for right now.
+function pauseCause(r, a) {
+  if (r?.reason === "sponsored_limit") return "Today's free sorting allowance for this account is used up";
+  if (r?.reason === "jev_credits") return a?.own_jev_key ? "Your Jev key is out of credits. Add credits with its provider"
+    : "The free beta's shared Jev budget is used up for now";
+  return "Gmail asked Inbox Triage to slow down";
+}
+const pauseShort = (r) => r?.reason === "sponsored_limit" ? "daily allowance used"
+  : r?.reason === "jev_credits" ? "out of Jev credits" : "Gmail asked for a break";
+
 // When a run Gmail paused carries on by itself.
 function resumeText(a) {
   if (!a.resume_at) return a.last_run?.mode === "dry-run" ? "A preview starts over, so run it again once Gmail's break is over."
@@ -225,7 +235,7 @@ function resumeText(a) {
   return a.resume_at <= Date.now() / 1000 ? "It picks up where it stopped in a moment, on its own."
     : `It picks up where it stopped ${upcoming(a.resume_at)}, on its own.`;
 }
-const TRIGGERS = { schedule: "Scheduled", resume: "Resumed" };
+const TRIGGERS = { schedule: "Scheduled", resume: "Resumed", extension: "From Gmail" };
 
 // A row of role=radio buttons with arrow-key support (a real radio group, drawn as buttons).
 function radioGroup({ label, options, value, onChange, cls = "seg", itemClass = "" }) {
@@ -286,7 +296,7 @@ function betaBanner() {
   const parts = [b.ended ? "The free beta has ended"
     : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "user" : `${b.max_accounts} users`}` : "Free beta"];
   if (until && !b.ended) parts[0] += ` until ${until}`;
-  parts.push("Bring your own Jev key");
+  parts.push(STATE.jev.sponsored ? "No API key needed" : "Bring your own Jev key");
   fill(slot, parts.map((p) => el("span", {}, p + " ·")),
     el("a", { href: "https://github.com/shimoverse/inbox-triage", target: "_blank", rel: "noopener" }, "Open source, self-host anytime"));
 }
@@ -431,20 +441,25 @@ function renderLanding() {
       el("ul", { class: "label-cards" }, ATTENTION.map((k) => el("li", {}, pill(k, true), el("p", {}, LABELS[k].help)))),
       el("p", { class: "note-line" }, pill("shopping"), "is added to orders and deliveries too. Anything Jev isn't sure about stays unlabeled."))),
     el("section", { class: "section", id: "how", "aria-labelledby": "how-h" },
-      el("h2", { class: "h-big", id: "how-h" }, "Three steps, then it runs on its own"),
-      el("ol", { class: "steps3" },
-        el("li", {}, el("span", { class: "n" }, "Step 1"), el("h3", {}, "Sign in with Google"),
-          el("p", {}, "Approve one permission so Inbox Triage can add its labels to your Gmail.")),
-        el("li", {}, el("span", { class: "n" }, "Step 2"), el("h3", {}, "Connect Jev"),
-          el("p", {}, "Jev by TypeSafe makes a fast yes-or-no call on each email. Paste your own key from ",
-            el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "console.typesafe.ai"), ".")),
-        el("li", {}, el("span", { class: "n" }, "Step 3"), el("h3", {}, "Say what matters"),
-          el("p", {}, "Tap Important, Can wait or Junk on a few emails, or describe it in your own words. Pick a schedule and you're done.")))),
+      el("h2", { class: "h-big", id: "how-h" }, `${STATE.jev.sponsored ? "Two" : "Three"} steps, then it runs on its own`),
+      el("ol", { class: "steps3" }, howSteps().map(([title, text], i) =>
+        el("li", {}, el("span", { class: "n" }, `Step ${i + 1}`), el("h3", {}, title), el("p", {}, text))))),
     el("section", { class: "trust", "aria-label": "Privacy and safety" },
       el("ul", { class: "trust-grid" }, trust.map(([ic, cls, title, text]) => el("li", {}, icon(ic, 26, cls), el("h3", {}, title), el("p", {}, text)))),
       el("div", { class: "trust-cta" },
         el("p", {}, "Ready for a calmer inbox?"),
         el("button", { type: "button", class: "btn invert lg", onclick: (e) => startGoogle(email.value, e.currentTarget) }, "Continue with Google", icon("arrow", 18))))));
+}
+
+// A sponsored beta pays for Jev, so there's no key to connect.
+function howSteps() {
+  const jev = ["Connect Jev", ["Jev by TypeSafe makes a fast yes-or-no call on each email. Paste your own key from ",
+    el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "console.typesafe.ai"), "."]];
+  return [
+    ["Sign in with Google", "Approve one permission so Inbox Triage can add its labels to your Gmail."],
+    ...(STATE.jev.sponsored ? [] : [jev]),
+    ["Say what matters", "Tap Important, Can wait or Junk on a few emails, or describe it in your own words. Pick a schedule and you're done."],
+  ];
 }
 
 function renderOAuthSetup() {
@@ -479,7 +494,7 @@ function renderOAuthSetup() {
 
 // ---------------------------------------------------------------- onboarding
 function newWizard(a, extra = {}) {
-  return { step: 1, emails: null, tags: {}, notes: "", proposed: null, days: 7, preview: true,
+  return { step: 1, emails: null, tags: {}, notes: "", proposed: null, days: 7, preview: false,
     schedule: { frequency: "daily", hour: 7, weekday: 0 }, ...extra };
 }
 function renderOnboarding(a) {
@@ -493,10 +508,13 @@ function goStep(st, step) { navigate(() => { st.step = step; render(); }); }
 function leaveWizard(a, toTab) { navigate(() => { delete onboard[a.email]; tab = toTab; render(); }); }
 
 function stepper(step) {
-  return el("ol", { class: "stepper", "aria-label": "Setup progress" }, ["Connect Jev", "What matters", "Schedule"].map((label, i) => {
-    const n = i + 1;
+  // In a sponsored beta there's no key to connect, so setup starts at "What matters".
+  const labels = STATE.jev.sponsored ? ["What matters", "Schedule"] : ["Connect Jev", "What matters", "Schedule"];
+  const skipped = 3 - labels.length;
+  return el("ol", { class: "stepper", "aria-label": "Setup progress" }, labels.map((label, i) => {
+    const n = i + 1 + skipped;  // the wizard's own step number
     return el("li", { class: n < step ? "done" : "", "aria-current": n === step ? "step" : null },
-      el("span", { class: "num", "aria-hidden": "true" }, n < step ? icon("check", 15) : String(n)),
+      el("span", { class: "num", "aria-hidden": "true" }, n < step ? icon("check", 15) : String(i + 1)),
       el("span", { class: "txt" }, label), n < step ? el("span", { class: "sr-only" }, " (done)") : null);
   }));
 }
@@ -522,7 +540,7 @@ function jevKeyForm(a, onDone, extra = null) {
   };
   return el("form", { class: "stack", onsubmit: go },
     el("div", { class: "field" }, el("label", { for: "jev-key" }, "Your Jev API key"), key,
-      el("span", { class: "help", id: "jev-key-help" }, "We check it with Jev before saving. It's used only for your mailbox."), error),
+      el("span", { class: "help", id: "jev-key-help" }, "A TypeSafe key or an OpenRouter key works. We check it with Jev before saving, and it's used only for your mailbox."), error),
     el("div", { class: "row" }, submit,
       el("a", { class: "btn", href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "Get a Jev key", icon("external", 15)), extra));
 }
@@ -695,6 +713,7 @@ function stepContext(a, st) {
   return el("div", { class: "wrap" },
     teach ? null : stepper(2),
     el("div", { class: "page-head" },
+      teach || !STATE.jev.sponsored ? null : el("span", { class: "kicker" }, `Welcome, ${a.email}`),
       el("h1", { tabindex: "-1" }, teach ? "Teach it more" : "Tell it what matters"),
       el("p", { class: "lead" }, "Mark a few emails, write a few words, or both. You'll see every rule before it's saved.")),
     el("div", { class: "split even" },
@@ -852,7 +871,7 @@ function pollJob(a, delay = 2500) {
       const ended = b.job && b.job.status !== "running" && (b.job.started === watching || b.job.started !== a.job?.started);
       if (ended) {
         if (b.job.status === "ok") toast(`Sorting finished: ${plural(b.job.result.processed || 0, "email")} checked.`);
-        else if (b.job.status === "paused") toast(`Gmail asked for a break. ${resumeText(b)}`);
+        else if (b.job.status === "paused") toast(`${pauseCause(b.job.result, b)}. ${resumeText(b)}`);
         else if (b.job.status === "error") toast("The run stopped. See the details on the dashboard.");
       }
       if (ended || b.job?.status === "running") return current === b.email && tab === "overview" ? render() : undefined;
@@ -885,7 +904,7 @@ function statusText(a) {
   if (!a.jev_connected) [kind, glyph, title, sub] = ["paused", "needs", "Sorting is paused", "Inbox Triage needs Jev to make decisions. Reconnect it to keep sorting."];
   else if (running) [kind, glyph, title, sub] = ["running", "sync", "Sorting now…", `Started ${ago(job.started)}. It keeps going if you leave this page.`];
   else if (a.last_run?.status === "paused") [kind, glyph, title, sub] = ["paused", "later", "Sorting is taking a short break",
-    `Gmail asked for a slower pace. Nothing is lost. ${resumeText(a)}`];
+    `${pauseCause(a.last_run, a)}. Nothing is lost. ${resumeText(a)}`];
   else if (a.settings.dry_run) [kind, glyph, title, sub] = ["preview", "eye", "Preview mode is on",
     `Runs show what would be labeled; Gmail isn't changed. ${s.frequency === "off" ? "No schedule." : `Runs ${scheduleText(s)}.`}`];
   else if (s.frequency === "off") [kind, glyph, title, sub] = ["manual", "hand", "Sorting runs when you ask", "No schedule is set. Click Run now, or pick one in Settings."];
@@ -964,7 +983,7 @@ function lastRunCard(a) {
       r.remaining && r.status === "ok" ? el("p", { class: "small muted" }, "More mail is left; the next run picks up where this one stopped.") : null,
     ] : null,
     r.status === "paused" ? el("div", { class: "notice warn" },
-      el("p", {}, el("b", {}, "Paused. "), `Gmail asked Inbox Triage to slow down, so this run stopped early. Nothing is lost. ${resumeText(a)}`),
+      el("p", {}, el("b", {}, "Paused. "), `${pauseCause(r, a)}, so this run stopped early. Nothing is lost. ${resumeText(a)}`),
       techDetails(r.message)) : null,
     r.status === "error" ? problem("This run didn't finish. ", r.message || r.error) : null);
   const side = el("div", { class: "side" },
@@ -1019,11 +1038,11 @@ function historyRow(r) {
   const trigger = TRIGGERS[r.trigger] || "Manual";
   const window = r.days ? `Last ${r.days} days · ` : "";
   const counts = `${window}${plural(r.processed ?? 0, "email")} · ${preview ? "preview, Gmail unchanged" : `${fmt(r.gmail_changes ?? 0)} labeled`}`;
-  const summary = ok ? counts : paused ? `${counts} · Gmail asked for a break`
+  const summary = ok ? counts : paused ? `${counts} · ${pauseShort(r)}`
     : `Didn't finish. ${explainError(r.message || r.error)}`;
   return el("li", { class: "hrow" },
     el("span", { class: "when" }, when(r.started)),
-    el("span", { class: "badge" + (r.trigger === "schedule" || r.trigger === "resume" ? "" : " manual") }, trigger),
+    el("span", { class: "badge" + (["schedule", "resume", "extension"].includes(r.trigger) ? "" : " manual") }, trigger),
     el("span", { class: "sum" + (ok || paused ? "" : " err-text"), title: ok ? null : r.message || null }, el("span", { class: "m-only" }, trigger + " · "), summary),
     ((ok || paused) && outcomeBar(r.outcomes, true)) || el("span", { class: "bar-slot" }),
     ok ? el("span", { class: "state ok" }, icon("check", 16), r.remaining ? "Done, more left" : "Done")
@@ -1188,8 +1207,10 @@ function settingsPane(a) {
         el("label", { class: "switch-row plain", for: "pm" }, preview, previewText)),
       setrow("set-jev", "Jev", "Makes every sorting decision.",
         el("div", { class: "row between" },
-          a.jev_connected ? el("span", { class: "conn ok" }, "Connected") : el("span", { class: "conn warn" }, "Not connected"),
-          el("button", { class: "btn", type: "button", onclick: changeKey }, a.jev_connected ? "Change key" : "Connect Jev")),
+          STATE.jev.sponsored && !a.own_jev_key ? el("span", { class: "conn ok" }, "Included in the free beta")
+            : a.jev_connected ? el("span", { class: "conn ok" }, "Connected") : el("span", { class: "conn warn" }, "Not connected"),
+          el("button", { class: "btn", type: "button", onclick: changeKey },
+            STATE.jev.sponsored && !a.own_jev_key ? "Use my own key" : a.jev_connected ? "Change key" : "Connect Jev")),
         el("div", { class: "field" }, el("label", { for: "model" }, "Model"), model,
           el("span", { class: "help", id: "model-help" }, "Leave empty to use jev-latest."))),
       el("div", { class: "setrow" }, el("div", { class: "lbl" }, el("h2", {}, "Notes assistant"), el("p", {}, "Optional. Turns your notes into rules.")), assistantBox),

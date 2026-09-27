@@ -5,7 +5,7 @@ import calendar
 import json
 import os
 import time
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -73,6 +73,20 @@ class Account:
 
     def save_jev_key(self, key: str) -> None:
         write_private(self.dir / "secrets.json", json.dumps({"TYPESAFE_API_KEY": key} if key else {}))
+
+    # -- sponsored Jev usage (the operator's key pays, up to a daily limit) --
+    def sponsored_calls(self, now: int | None = None) -> int:
+        """Jev calls the operator's key paid for today (UTC)."""
+        try:
+            saved = json.loads((self.dir / "usage.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        return int(saved.get("jev_calls", 0)) if isinstance(saved, dict) and saved.get("day") == utc_day(now) else 0
+
+    def add_sponsored_calls(self, calls: int, now: int | None = None) -> None:
+        if calls > 0:
+            write_private(self.dir / "usage.json", json.dumps(
+                {"day": utc_day(now), "jev_calls": self.sponsored_calls(now) + calls}))
 
     # -- preferences ------------------------------------------------------
     def preferences(self) -> prefs_mod.Preferences:
@@ -162,6 +176,15 @@ class Account:
         return None
 
 
+def utc_day(now: int | None = None) -> str:
+    return datetime.fromtimestamp(int(now if now is not None else time.time()), timezone.utc).strftime("%Y-%m-%d")
+
+
+def next_utc_midnight(now: int | None = None) -> int:
+    day = datetime.fromtimestamp(int(now if now is not None else time.time()), timezone.utc)
+    return int((day.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp())
+
+
 def schedule_zone(sched: dict) -> tzinfo | None:
     """The zone a schedule's hours are in: the one it was set in, else None (the server's local time)."""
     name = str(sched.get("tz") or "")
@@ -210,31 +233,42 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
 
 
 def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
-                since: int | None = None, runner_kwargs: dict | None = None, now: int | None = None) -> dict:
+                since: int | None = None, runner_kwargs: dict | None = None, now: int | None = None,
+                jev_daily_limit: int | None = None) -> dict:
     """Run triage in batches until the window is done (bounded), and record history.
     A run Gmail throttles is recorded as paused (with when to resume), not as failed.
-    A rescan of ``days`` records where its window starts (``since``) so a resume covers the same mail."""
+    A rescan of ``days`` records where its window starts (``since``) so a resume covers the same mail.
+    ``jev_daily_limit`` is set when the operator's key pays: past that many Jev calls today (UTC),
+    the run pauses until midnight UTC, the same way it pauses for Gmail."""
     from . import runner
     started = int(now if now is not None else time.time())
     since = (int(since) if since else started - days * 86400) if days else None
     acct = Account(state_root, account)
     totals: dict = {"processed": 0, "gmail_changes": 0, "jev_calls": 0, "jev_ms": 0, "provider_failures": 0,
-                    "gmail_slowdowns": 0, "outcomes": {}}
+                    "gmail_slowdowns": 0, "jev_cost": 0.0, "outcomes": {}}
     entry = {"started": started, "trigger": trigger, "days": days, **({"since": since} if since else {})}
 
     def add(result: dict) -> None:
         for key in ("processed", "gmail_changes", "jev_calls", "jev_ms", "provider_failures", "gmail_slowdowns"):
             totals[key] += int(result.get(key) or 0)
+        totals["jev_cost"] = round(totals["jev_cost"] + float(result.get("jev_cost") or 0), 6)
         for key, value in (result.get("outcomes") or {}).items():
             totals["outcomes"][key] = totals["outcomes"].get(key, 0) + value
         totals.update({k: result[k] for k in ("mode", "remaining") if k in result})
+        if jev_daily_limit:  # failed calls may still be billed, so they count too
+            acct.add_sponsored_calls(int(result.get("jev_calls") or 0) + int(result.get("provider_failures") or 0), now)
 
     try:
         for _ in range(MAX_BATCHES):
-            result = runner.run(account, root=state_root, since_days=days, since=since, now=now, **(runner_kwargs or {}))
+            kwargs = dict(runner_kwargs or {})
+            if jev_daily_limit:
+                kwargs["jev_budget"] = runner.JevBudget(max(0, jev_daily_limit - acct.sponsored_calls(now)),
+                                                        next_utc_midnight(now))
+            result = runner.run(account, root=state_root, since_days=days, since=since, now=now, **kwargs)
             add(result)
             if result.get("paused_until"):
-                # Gmail asked for a break: keep what's done and pick the rest up when it says.
+                # Gmail asked for a break, or Jev's allowance is used up: keep what's done and pick
+                # the rest up when it says.
                 entry.update(resume_at=int(result["paused_until"]), reason=str(result.get("pause_code") or ""),
                              message=str(result.get("pause_reason") or "")[:300])
                 break

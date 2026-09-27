@@ -20,7 +20,9 @@ Jev by TypeSafe is a **System One model**. It doesn't write text; it makes fast,
 
 Fixed local rules turn those answers into at most one attention label, plus a Shopping topic label when that applies. TypeSafe quotes about 0.1 s and a small fraction of a cent per decision, and the dashboard shows the number of Jev decisions and their average latency for every run.
 
-**A Jev key is required, and each user brings their own.** Get one at [console.typesafe.ai](https://console.typesafe.ai/). Without it the app won't sort mail, and it links you there. On the hosted app a user's key is used only for their own mailbox, and the server never falls back to an operator key.
+**Jev runs through OpenRouter or TypeSafe.** OpenRouter sells Jev directly (`jev-latest`, $0.042 per million input tokens, output free), so one [OpenRouter key](https://openrouter.ai/keys) is enough, and no TypeSafe account is needed. A TypeSafe key from [console.typesafe.ai](https://console.typesafe.ai/) works too. Inbox Triage sends about 1,500 tokens per email, roughly $0.00006.
+
+On the hosted app, a user's own key is used only for their own mailbox. The server pays for users' Jev calls only when its operator runs a sponsored free beta, and then only up to a daily limit per account (see [docs/hosting.md](docs/hosting.md#5-sponsored-beta-the-operator-pays-for-jev)).
 
 ```mermaid
 flowchart LR
@@ -40,21 +42,21 @@ Jev only sees the sender's domain, a subject of up to 200 characters, a cleaned 
 |---|---|---|
 | For | Anyone; no technical setup | Developers, privacy maximalists, contributors |
 | Google setup | None; the app's Google project is already set up | Create your own OAuth client once (about 10 min, guided in the app) |
-| You provide | Your Jev key | Your Jev key, plus optionally an OpenRouter key for the notes assistant |
+| You provide | Nothing during the free beta; otherwise your Jev key | One OpenRouter key (runs Jev and the notes assistant), or a TypeSafe key |
 | Where mail is processed | The operator's server | Your own computer |
 | Scheduling | Handled by the server | Keep the app running, or add one cron line |
 
 ### Path 1: use the hosted app
 
-The hosted app is **free for the first 100 users** (beta). You bring your own Jev key; the code is MIT-licensed, so you can always self-host instead.
+The hosted app is **free for the first 100 users** (beta). During the beta the operator pays for Jev, so there's no key to paste. The code is MIT-licensed, so you can always self-host instead.
 
 1. Open the app, click **Continue with Google** and approve the permission to manage Gmail labels.
-2. **Connect Jev.** Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
+2. **Connect Jev**, unless the beta covers it. Paste your Jev key; it's checked with Jev before it's saved. No key? Click **Get a Jev key**.
 3. **Tell it what matters.**
    - Tap *Important*, *Can wait* or *Junk* on a few recent emails.
    - Or type freely: *"#1 is my kids' school, always important. I don't care about real estate emails."* Prefer talking? Speak into Open Voice Flow or any voice-to-text app and paste the text.
    - Click **Turn notes into rules**, review the rules, and save.
-4. **Pick a timeframe** (last day, 7, 30 or 90 days, optionally preview-only) **and a schedule** (hourly, daily, weekly, or the last day of each month).
+4. **Pick a timeframe** (last day, 7, 30 or 90 days) **and a schedule** (hourly, daily, weekly, or the last day of each month). The first run adds labels straight away; switch on *Preview first* to see them without changing Gmail.
 5. **Watch the dashboard:** last and next run, Jev decisions and speed, run history, recently labeled mail with links into Gmail, and your rules.
 
 *Operators:* deploying takes one command on a small Linux server (`sudo DOMAIN=… bash deploy/install.sh`; no Docker needed). See [docs/hosting.md](docs/hosting.md), plus [docs/google-cloud-setup.md](docs/google-cloud-setup.md) for the one-time Google Cloud work.
@@ -67,7 +69,7 @@ Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/). **No other depe
 git clone https://github.com/shimoverse/inbox-triage.git
 cd inbox-triage
 uv sync
-cp .env.example .env        # add TYPESAFE_API_KEY (required) and OPENROUTER_API_KEY (optional)
+cp .env.example .env        # add OPENROUTER_API_KEY (Jev + notes assistant), or TYPESAFE_API_KEY
 uv run inbox-triage-web     # opens http://127.0.0.1:8765
 ```
 
@@ -87,6 +89,16 @@ uv run inbox-triage --account you@example.com --dry-run   # preview, no Gmail ch
 uv run inbox-triage --all --days 30                       # backfill 30 days for every account
 ```
 
+## Chrome and Brave extension
+
+`extension/` adds a live Inbox Triage dashboard to the top of Gmail. It shows:
+
+- label chips with 7-day counts, which open the label;
+- a chart of mail labeled per day;
+- what was labeled recently.
+
+It asks the server to sort new mail as it arrives, so labels appear within about a minute while Gmail is open. The extension only draws the dashboard: it holds no Google token and no AI key, and signs in through your server with `launchWebAuthFlow`, which works in both Chrome and Brave. See [extension/README.md](extension/README.md) to load it.
+
 ## The optional notes assistant
 
 Jev decides; it doesn't write. Reading your typed notes and proposing rules is a language task, so it goes to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, which you can change with `INBOX_TRIAGE_ASSIST_MODEL`). It runs only when you click **Turn notes into rules**, and you review every rule before it's saved. On the hosted app the operator provides it. When you run it yourself, add `OPENROUTER_API_KEY` or skip it and tag emails instead. It never classifies email.
@@ -103,6 +115,10 @@ Jev decides; it doesn't write. Reading your typed notes and proposing rules is a
 - **Context comes from your mailbox.** People you've emailed, threads you joined, and authenticated receipts count. Only account-scoped hashes of these facts are stored, updated through the Gmail History API, and rebuilt automatically if that history expires.
 - **Gmail rate limits pause, never fail.** Requests to one mailbox share a budget: at most 4 at once, starting at 10 a second, halving whenever Gmail pushes back. If Gmail asks for a longer break, the run stops, keeps everything done so far, shows *Paused* with the time it carries on, and resumes on its own when the break is over (up to 6 times; the web app's scheduler or `inbox-triage --all --due` does this).
 - **Jev failures are contained.** Jev calls retry on 429 and 529 ("overloaded"). A message that repeatedly gets an unusable answer is left unchanged after three tries. If Jev fails repeatedly in a row, the run stops without advancing.
+- **Running out of Jev pauses, never fails.** Two cases pause the run like a Gmail break, keeping everything done so far, and it carries on by itself:
+  - a sponsored beta's daily allowance is used up (it resumes after midnight UTC);
+  - the key is out of credits (it tries again an hour later).
+- **Labels are colour-coded in Gmail** to match the app. Labels made by older versions get their colour once, unless you've already picked one.
 - **Google Workspace admins** can triage many mailboxes with a service account and domain-wide delegation: `uv sync --extra workspace`, then `inbox-triage --service-account key.json --account a@corp.example --account b@corp.example`.
 
 ## Privacy and limits

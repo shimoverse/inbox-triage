@@ -31,13 +31,18 @@ from ..preferences import Preferences
 from ..assistant import DEFAULT_MODEL as ASSIST_DEFAULT_MODEL, Assistant
 from ..providers import KEY_ENV, ProviderError, make_provider
 from ..runner import MAX_WINDOW_DAYS, default_token, discover_accounts
-from . import oauth
+from . import extension as ext, oauth
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "inbox_triage_session"
 SESSION_TTL = 30 * 86400
 SUMMARY_TTL = 600  # seconds the dashboard reuses a message's sender/subject (memory only, never on disk)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EXT_CORS_PATHS = {"/api/ext/token", "/api/ext/summary", "/api/ext/sync"}
+# Only the extension's connect page, and only characters a URL query may hold (no spaces, CR/LF or #).
+NEXT_RE = re.compile(r"/connect\?[A-Za-z0-9_\-.~%&=+:/@!$'()*,;]*")
+BETA_FULL = ("The free beta is full. Inbox Triage is open source, so you can run it yourself: "
+             "github.com/shimoverse/inbox-triage")
 
 
 class HTTPError(Exception):
@@ -64,6 +69,8 @@ class App:
         self.pending: dict[str, dict] = {}  # OAuth state -> {verifier, created}
         self.jobs: dict[str, Job] = {}
         self.summaries: dict[tuple[str, str], tuple[float, dict]] = {}  # (account, message id) -> (when, summary)
+        self.ext_codes: dict[str, dict] = {}  # one-time extension sign-in code -> {email, challenge, redirect_uri, created}
+        self.ext_syncs: dict[str, float] = {}  # account -> when its extension last started a sync
         self.lock = threading.Lock()
         allowed = urlparse(self.base_url)
         self.allowed_hosts = {allowed.netloc}
@@ -119,7 +126,7 @@ class App:
             traceback.print_exc()
             status, headers, body = 500, [("Content-Type", "application/json")], b'{"error":"Internal error"}'
         headers += [("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
-                    ("X-Frame-Options", "DENY"), ("Cache-Control", "no-store")]
+                    ("X-Frame-Options", "DENY"), ("Cache-Control", "no-store"), *self.cors_headers(environ)]
         start_response(f"{status} {_REASONS.get(status, 'OK')}", headers)
         return [body]
 
@@ -134,8 +141,12 @@ class App:
             raise HTTPError(400, "Unexpected Host header")  # DNS-rebinding guard
         if method in {"POST", "PUT", "DELETE"} and environ.get("HTTP_X_REQUESTED_WITH") != "inbox-triage":
             raise HTTPError(403, "Missing CSRF header")
+        if method == "OPTIONS" and path in EXT_CORS_PATHS:
+            return 204, [], b""  # CORS preflight from the extension; cors_headers() adds the rest
         if path == "/" or path == "/index.html":
             return self.static("index.html")
+        if path == "/connect":
+            return self.static("connect.html")
         if path in {"/privacy", "/privacy.html"}:
             return self.privacy()
         if path.startswith("/static/") and not path.endswith("privacy.html"):
@@ -148,6 +159,8 @@ class App:
         query = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
         parts = [p for p in path.removeprefix("/api/").split("/") if p]
         emails = self.session_emails(environ)
+        if parts[:1] == ["ext"]:
+            return self.json(self.ext_api(method, parts[1] if len(parts) > 1 else "", body, query, environ, emails))
         route = (method, parts[0] if parts else "")
         if route == ("GET", "state"):
             return self.json(self.state(emails))
@@ -215,9 +228,20 @@ class App:
         return bool(limit) and len(discover_accounts(self.config_dir)) >= limit
 
     def machine_jev_key(self) -> str:
-        """This computer's Jev key, used only when self-hosting. Hosted servers ignore it:
-        every user must connect their own Jev, so the operator never pays for others."""
-        return "" if self.hosted else config.api_key_for("jev", self.config_dir)
+        """This computer's Jev key, for accounts without their own. A hosted server uses it
+        only in a sponsored beta (INBOX_TRIAGE_SPONSORED_JEV_DAILY), up to that daily limit;
+        otherwise every user connects their own Jev, so the operator never pays by accident."""
+        if self.hosted and not config.sponsored_daily_limit():
+            return ""
+        return config.api_key_for("jev", self.config_dir)
+
+    @property
+    def sponsored(self) -> bool:
+        """A hosted server whose operator pays for users' Jev calls (the free beta)."""
+        return self.hosted and bool(config.sponsored_daily_limit()) and bool(self.machine_jev_key())
+
+    def jev_access(self, acct: Account, settings: dict | None = None) -> config.JevAccess:
+        return config.jev_access(settings, None, self.config_dir, acct.jev_key(), hosted=self.hosted)
 
     def privacy(self):
         """Privacy policy for Google's consent screen; the operator's contact comes from the environment."""
@@ -239,13 +263,15 @@ class App:
             paused = acct.pending_resume()
             accounts.append({"email": email, "connected": email in connected, "settings": settings,
                              "jev_connected": bool(acct.jev_key() or self.machine_jev_key()),
+                             "own_jev_key": bool(acct.jev_key()),
                              "last_run": runs[0] if runs else None, "next_run": acct.next_run(),
                              "resume_at": paused["resume_at"] if paused else None,
                              "job": job.__dict__ if job else None,
                              "rules": len(acct.preferences().rules)})
         return {"accounts": accounts, "hosted": self.hosted,
                 "oauth_configured": oauth.client_config(self.config_dir) is not None,
-                "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url()},
+                "jev": {"connected": bool(self.machine_jev_key()), "signup_url": config.signup_url(),
+                        "sponsored": self.sponsored},
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
                 "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
@@ -255,15 +281,24 @@ class App:
         email = str(body.get("email", "")).strip().casefold()
         if email and not EMAIL_RE.match(email):
             raise HTTPError(400, "Enter a valid email address")
+        if self.beta_full() and not email:
+            # Checked before Google's consent screen: every person who approves an unverified app
+            # uses up one of Google's 100 lifetime sign-ins, even if we turn them away afterwards.
+            # A typed address always goes on to Google (members sign back in that way; the callback
+            # turns anyone else away), so this answer never reveals who has an account here.
+            raise HTTPError(409, BETA_FULL + " Already a member? Choose “Use a specific account” and enter your address.")
         client = oauth.client_config(self.config_dir)
         if client is None:
             raise HTTPError(409, "Google sign-in isn't configured on this server yet")
+        # Where to come back to after Google: the extension's connect page, or the app.
+        after = str(body.get("next", ""))
+        after = after if len(after) < 2000 and NEXT_RE.fullmatch(after) else ""
         state = secrets.token_urlsafe(24)
         url, verifier = oauth.authorization_url(client, self.redirect_uri, state, email or None)
         with self.lock:
             now = time.time()
             self.pending = {k: v for k, v in self.pending.items() if now - v["created"] < 900}
-            self.pending[state] = {"verifier": verifier, "created": now, "hint": email}
+            self.pending[state] = {"verifier": verifier, "created": now, "hint": email, "next": after}
         return {"url": url}
 
     @property
@@ -276,26 +311,26 @@ class App:
             pending = self.pending.pop(query.get("state", ""), None)
         if not pending:
             return self.redirect("/#error=" + quote("Sign-in expired, please try again"))
+        back = pending.get("next") or "/"
         if "error" in query or "code" not in query:
-            return self.redirect("/#error=" + quote("Google sign-in was cancelled"))
+            return self.redirect(back + "#error=" + quote("Google sign-in was cancelled"))
         client = oauth.client_config(self.config_dir)
         try:
             credentials = oauth.exchange(client, self.redirect_uri, query["code"], pending["verifier"])
         except Exception:
-            return self.redirect("/#error=" + quote("Google sign-in failed, please try again"))
+            return self.redirect(back + "#error=" + quote("Google sign-in failed, please try again"))
         granted = getattr(credentials, "granted_scopes", None) or [SCOPE]
         if SCOPE not in granted:
-            return self.redirect("/#error=" + quote("Please tick the Gmail permission so labels can be added"))
+            return self.redirect(back + "#error=" + quote("Please tick the Gmail permission so labels can be added"))
         email = oauth.profile_email(credentials).casefold()
         if self.beta_full() and email not in discover_accounts(self.config_dir):
             # Beta is full: don't keep access to a mailbox we won't serve.
             oauth.revoke_token(getattr(credentials, "refresh_token", "") or getattr(credentials, "token", ""))
-            return self.redirect("/#error=" + quote(
-                "The free beta is full. Inbox Triage is open source, so you can run it yourself: "
-                "github.com/shimoverse/inbox-triage"))
+            return self.redirect(back + "#error=" + quote(BETA_FULL))
         write_private(default_token(email, self.config_dir), credentials.to_json())
         emails = sorted(set(self.session_emails(environ)) | {email})
-        return self.redirect(f"/#account={quote(email)}", [("Set-Cookie", self.session_cookie(emails))])
+        target = pending["next"] if pending.get("next") else f"/#account={quote(email)}"
+        return self.redirect(target, [("Set-Cookie", self.session_cookie(emails))])
 
     @staticmethod
     def redirect(location: str, headers=None):
@@ -440,6 +475,125 @@ class App:
             raise HTTPError(422, str(exc)) from None
         return proposed.to_json()
 
+    # ------------------------------------------------------------------ extension
+    @staticmethod
+    def cors_headers(environ) -> list[tuple[str, str]]:
+        """The extension calls these endpoints from its own origin with a bearer token (never cookies),
+        so any extension origin may read the answers; tokens are only ever issued to listed extensions."""
+        origin = environ.get("HTTP_ORIGIN", "")
+        if environ.get("PATH_INFO") not in EXT_CORS_PATHS or not origin.startswith("chrome-extension://"):
+            return []
+        return [("Access-Control-Allow-Origin", origin), ("Vary", "Origin"), ("Access-Control-Max-Age", "600"),
+                ("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With"),
+                ("Access-Control-Allow-Methods", "GET, POST, DELETE")]
+
+    def ext_api(self, method: str, action: str, body: dict, query: dict, environ, emails: list[str]):
+        if (method, action) == ("POST", "authorize"):
+            return self.ext_authorize(body, emails)
+        if (method, action) == ("POST", "token"):
+            return self.ext_token(body)
+        email, token_id = self.ext_account(environ)
+        if (method, action) == ("GET", "summary"):
+            return self.ext_summary(email, query)
+        if (method, action) == ("POST", "sync"):
+            return self.ext_sync(email)
+        if (method, action) == ("DELETE", "token"):
+            ext.TokenRegistry(Account(self.state_dir, email).dir).remove(token_id)
+            return {"ok": True}
+        raise HTTPError(404, "Not found")
+
+    def ext_authorize(self, body: dict, emails: list[str]) -> dict:
+        """The connect page, after the person clicks Connect: a one-time code for the extension."""
+        redirect_uri, state = str(body.get("redirect_uri", "")), str(body.get("state", ""))
+        challenge, email = str(body.get("code_challenge", "")), str(body.get("email", "")).strip().casefold()
+        if not ext.redirect_allowed(redirect_uri, self.hosted):
+            raise HTTPError(403, "This extension isn't allowed to connect to this server")
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{43}", challenge) or not 8 <= len(state) <= 200:
+            raise HTTPError(400, "The extension's sign-in request is incomplete; try again from Gmail")
+        if email not in emails:
+            raise HTTPError(403, "Sign in with this Google account first")
+        if email not in discover_accounts(self.config_dir):
+            raise HTTPError(409, "Reconnect this account with Google")
+        code = secrets.token_urlsafe(32)
+        with self.lock:
+            now = time.time()
+            self.ext_codes = {k: v for k, v in self.ext_codes.items() if now - v["created"] < ext.CODE_TTL}
+            self.ext_codes[code] = {"email": email, "challenge": challenge, "redirect_uri": redirect_uri, "created": now}
+        acct = Account(self.state_dir, email)
+        settings = acct.settings()
+        if not settings["onboarded"] and settings["schedule"]["frequency"] == "off":
+            acct.update_settings({"schedule": {"frequency": "hourly"}})  # keep new mail sorted between visits
+        _log(f"extension connected account={_tag(email)}")
+        sep = "&" if "?" in redirect_uri else "?"
+        return {"redirect": f"{redirect_uri}{sep}code={quote(code)}&state={quote(state)}"}
+
+    def ext_token(self, body: dict) -> dict:
+        """The extension swaps its one-time code (and PKCE verifier) for a revocable token."""
+        with self.lock:
+            entry = self.ext_codes.pop(str(body.get("code", "")), None)
+        if not entry or time.time() - entry["created"] > ext.CODE_TTL:
+            raise HTTPError(400, "Sign-in expired, please try again")
+        if str(body.get("redirect_uri", "")) != entry["redirect_uri"] \
+                or not ext.pkce_matches(str(body.get("code_verifier", "")), entry["challenge"]):
+            raise HTTPError(400, "Sign-in couldn't be verified, please try again")
+        now, token_id = int(time.time()), secrets.token_urlsafe(16)
+        ext.TokenRegistry(Account(self.state_dir, entry["email"]).dir).add(token_id, now)
+        token = self._sign({"kind": "ext", "email": entry["email"], "tid": token_id, "exp": now + ext.TOKEN_TTL})
+        return {"token": token, "email": entry["email"], "expires_at": now + ext.TOKEN_TTL}
+
+    def ext_account(self, environ) -> tuple[str, str]:
+        auth = environ.get("HTTP_AUTHORIZATION", "")
+        data = self._unsign(auth[7:].strip()) if auth.startswith("Bearer ") else None
+        if not data or data.get("kind") != "ext":
+            raise HTTPError(401, "Connect the extension again")
+        email, token_id = str(data.get("email", "")), str(data.get("tid", ""))
+        # Disconnecting the account, or the extension, revokes its tokens.
+        if email not in discover_accounts(self.config_dir) \
+                or not ext.TokenRegistry(Account(self.state_dir, email).dir).valid(token_id):
+            raise HTTPError(401, "Connect the extension again")
+        return email, token_id
+
+    def ext_summary(self, email: str, query: dict) -> dict:
+        """What the Gmail dashboard bar draws: counts per label per day, the run status, recent decisions."""
+        from ..runner import load_events
+        acct = Account(self.state_dir, email)
+        events = list(load_events(acct.dir / "events.jsonl").values())  # IDs and label names only
+        counts = ext.label_counts(events, int(time.time()), str(query.get("tz", ""))[:64])
+        labeled = sorted((e for e in events if e.get("status") == "verified" and e.get("names")),
+                         key=lambda e: int(e.get("ts", 0)), reverse=True)[:8]
+        recent, details = self.decorate(email, labeled)
+        runs, job, paused = acct.runs(1), self.jobs.get(email), acct.pending_resume()
+        settings = acct.settings()
+        jev = bool(acct.jev_key() or self.machine_jev_key())
+        return {"email": email, "app_url": self.base_url, "jev_connected": jev, "sponsored": self.sponsored,
+                "running": bool(job and job.status == "running"), "last_run": runs[0] if runs else None,
+                "next_run": acct.next_run(), "resume_at": paused["resume_at"] if paused else None,
+                "preview": bool(settings.get("dry_run")), "schedule": settings["schedule"]["frequency"],
+                "labels": ext.LABEL_KEYS, **counts, "details": details,
+                "recent": [{"id": d["id"], "names": d.get("names", []), "from": d.get("from", ""),
+                            "subject": d.get("subject", ""), "ts": d.get("ts", 0)} for d in recent]}
+
+    def ext_sync(self, email: str) -> dict:
+        """The extension saw new mail: sort it now, unless a run is going, Gmail asked for a break,
+        or this account's extension already started one in the last minute."""
+        acct = Account(self.state_dir, email)
+        now = time.time()
+        job = self.jobs.get(email)
+        if job and job.status == "running":
+            return {"started": False, "reason": "running"}
+        last = acct.runs(1)
+        if last and last[0].get("status") == "paused" and int(last[0].get("resume_at") or 0) > now:
+            return {"started": False, "reason": "paused", "resume_at": int(last[0]["resume_at"])}
+        with self.lock:
+            if now - self.ext_syncs.get(email, 0) < ext.SYNC_INTERVAL:
+                return {"started": False, "reason": "recent"}
+            self.ext_syncs[email] = now
+        try:
+            self.start_job(email, None, False, "extension")
+        except HTTPError as exc:
+            return {"started": False, "reason": "unavailable", "message": exc.message}
+        return {"started": True}
+
     # ------------------------------------------------------------------ jobs
     def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None) -> dict:
         if days not in (None, ""):
@@ -449,8 +603,7 @@ class App:
         else:
             days = None
         try:
-            config.jev_settings(None, None, self.config_dir, Account(self.state_dir, email).jev_key(),
-                                allow_machine_key=not self.hosted)
+            self.jev_access(Account(self.state_dir, email))
         except config.JevRequired as exc:
             raise HTTPError(409, str(exc)) from None
         with self.lock:
@@ -465,18 +618,18 @@ class App:
         acct = Account(self.state_dir, job.account)
         settings = acct.settings()
         try:
-            model, key = config.jev_settings(settings, None, self.config_dir, acct.jev_key(),
-                                             allow_machine_key=not self.hosted)
-            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since, runner_kwargs={
-                "token": default_token(job.account, self.config_dir), "model": model,
-                "api_key": key, "dry_run": dry_run or bool(settings.get("dry_run"))})
+            access = self.jev_access(acct, settings)
+            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since,
+                                     jev_daily_limit=access.daily_limit, runner_kwargs={
+                "token": default_token(job.account, self.config_dir), "model": access.model,
+                "api_key": access.key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "paused" if job.result.get("status") == "paused" else "ok"
             result = job.result
             detail = (f" resume_in={max(0, int(result.get('resume_at', 0) - time.time()))}s reason={result.get('reason', '')}"
                       if job.status == "paused" else "")
             _log(f"run {job.status} account={_tag(job.account)} trigger={trigger} processed={result.get('processed', 0)} "
                  f"labeled={result.get('gmail_changes', 0)} jev_calls={result.get('jev_calls', 0)} "
-                 f"slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
+                 f"jev_cost={result.get('jev_cost', 0)} slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
         except Exception as exc:
             job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
             # Google's status and reason code say what went wrong without any mailbox content.
@@ -500,6 +653,18 @@ class App:
             except HTTPError:
                 continue  # already running, or Jev isn't connected
         return started
+
+
+def check_operator_key(key: str) -> bool:
+    """One tiny Jev call at startup, so a wrong or empty sponsored key shows up in the logs
+    before any user's run fails on it."""
+    try:
+        make_provider("jev", api_key=key).verify()
+    except ProviderError as exc:
+        _log(f"sponsored Jev key check failed status={getattr(exc, 'status', '') or 'network'}")
+        return False
+    _log("sponsored Jev key check ok")
+    return True
 
 
 def _tag(email: str) -> str:
@@ -528,7 +693,7 @@ def _summarize(message: dict) -> dict:
             "snippet": str(message.get("snippet", ""))[:200], "labels": message.get("labelIds", [])}
 
 
-_REASONS = {200: "OK", 302: "Found", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
+_REASONS = {200: "OK", 204: "No Content", 302: "Found", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
             409: "Conflict", 422: "Unprocessable Entity", 429: "Too Many Requests", 500: "Internal Server Error"}
 
 
@@ -554,8 +719,14 @@ def serve(argv=None) -> int:
     base = args.public_url or f"http://127.0.0.1:{args.port}"
     config.load_dotenv(Path(".env"), args.config_dir / ".env")
     app = App(config_dir=args.config_dir, state_dir=args.state_dir, base_url=base, hosted=bool(args.public_url))
-    if app.hosted and config.api_key_for("jev", args.config_dir):
-        print("Note: hosted mode ignores the server's TYPESAFE_API_KEY; every user connects their own Jev key.")
+    if app.sponsored:
+        limit = config.sponsored_daily_limit()
+        print(f"Sponsored beta: accounts without their own Jev key use this server's key, up to {limit} Jev calls "
+              "per account per day. Cap the key's spending with its provider too.")
+        threading.Thread(target=check_operator_key, args=(app.machine_jev_key(),), daemon=True).start()
+    elif app.hosted and config.api_key_for("jev", args.config_dir):
+        print("Note: hosted mode ignores the server's Jev key; every user connects their own. "
+              "Set INBOX_TRIAGE_SPONSORED_JEV_DAILY to pay for users' Jev calls instead.")
 
     class Server(ThreadingMixIn, WSGIServer):
         daemon_threads = True
