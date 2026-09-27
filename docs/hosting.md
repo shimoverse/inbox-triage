@@ -70,11 +70,11 @@ In hosted mode:
   - `INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD` (optional, unset by default) adds an end date to the banner. It's informational: the app keeps running, and you decide what happens next.
   - Counts are never shown to users;
 - the app serves its own home page (`/`) and privacy policy (`/privacy`), so the consent screen can use `https://<domain>/` and `https://<domain>/privacy`;
-- **Disconnect account** revokes Google access and deletes all of that user's stored data;
+- **Disconnect account** removes that account's token and active per-account data (including keys, settings, rules, history, context and extension access) and attempts Google grant revocation. A failed local deletion returns an error for retry; Google revocation is best effort;
 - the built-in scheduler runs every account's schedule, so run exactly one instance;
 - `/var/lib/inbox-triage` holds users' Google tokens, Jev keys, and rules. Use an encrypted disk and encrypted snapshots, and restrict SSH.
 
-You are now processing other people's mail: publish a privacy policy, delete data when someone disconnects (the app revokes the Google grant and deletes the token), and follow Google's [API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy).
+You are now processing other people's mail: publish a privacy policy, keep a documented encrypted-backup retention/deletion policy, and follow Google's [API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy). Revocation at Google alone does not notify the server or remove local data: users must also Disconnect or contact the operator for deletion. A Disconnect removes active server data, not copies already held in backups or labels already applied in Gmail.
 
 **Prefer containers?** A `Dockerfile` is included as an alternative: mount `/data`, pass the same environment variables, add `--public-url https://…`, and put any TLS proxy in front of port 8765.
 
@@ -112,7 +112,7 @@ The extension ([extension/README.md](../extension/README.md)) draws a live dashb
 - **Sign-in:** the extension signs in with `chrome.identity.launchWebAuthFlow` against this server's `/connect` page. That works in Chrome and Brave.
   - The person approves the extension there, and the server hands it a one-time code bound to a PKCE challenge.
   - The extension swaps the code for a token. The token lasts 90 days, can only read that account's dashboard and ask for a sync, and is revoked by *Disconnect* in the extension or on the website.
-- **List the extension's ID:** a hosted server hands tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS` (comma-separated IDs). Without it, extension sign-in is turned off.
+- **List the extension's ID:** a hosted server hands tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS` (comma-separated IDs). Without it, extension sign-in is turned off. The existing unpacked beta ID is `leagpjpjajkpjaiegjjenjnlegffkofj`; when the Chrome Web Store assigns a different ID, allowlist **both** IDs before distribution, then remove the unpacked ID only after its testers have migrated. Store installs have separate extension storage, so testers must reconnect. See [the store beta worksheet](../extension/STORE_BETA.md#stable-id-and-beta-migration--no-private-key-in-the-repository).
 - **Default schedule:** accounts connected from the extension get an hourly schedule if they don't have one yet, so mail keeps getting labeled between visits.
 - **Syncs cost little:** each account's extension can start at most one sync a minute. A sync continues from the last checkpoint and skips mail it has already labeled, so it costs Jev calls only for new mail.
 

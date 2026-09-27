@@ -11,6 +11,8 @@ from inbox_triage.models import ContextPack, Destination, JevSignals, MailEviden
 from inbox_triage.policy import decide
 from inbox_triage.web import app as webapp
 from inbox_triage.web import oauth
+from inbox_triage.store import TriageStore
+from inbox_triage.runner import account_lock, account_lock_path
 
 EMAIL = "a@example.org"
 
@@ -368,11 +370,266 @@ def test_disconnect_deletes_all_account_data(app, monkeypatch):
     acct.update_settings({"schedule": {"frequency": "daily"}})
     acct.record_run({"started": 1, "status": "ok"})
     (acct.dir / "events.jsonl").write_text('{"id":"m","status":"verified"}\n')
+    other = Account(app.state_dir, "b@example.org")
+    other.save_jev_key("other")
+    other.record_run({"started": 2, "status": "ok"})
+    other_token = app.config_dir / "tokens" / "b@example.org.json"
+    other_token.write_text("{}")
+    with TriageStore(acct.dir / "context.db") as store:
+        store.set_cursor(EMAIL, "1")
+        store.put_fact(EMAIL, "sender", "sample", 1, 100)
+        store.mark_bootstrapped(EMAIL, ["m"])
+    with TriageStore(other.dir / "context.db") as store:
+        store.set_cursor("b@example.org", "2")
+    app.summaries[(EMAIL, "m")] = (1, {"subject": "synthetic"})
+    app.summaries[("b@example.org", "n")] = (1, {})
+    app.ext_codes["old"] = {"email": EMAIL}
+    app.ext_codes["other"] = {"email": "b@example.org"}
+    app.ext_syncs[EMAIL] = 1
+    app.ext_syncs["b@example.org"] = 2
     status, headers, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)
     assert status == 200 and revoked
     assert not (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
     assert not acct.dir.exists()
+    assert other_token.exists() and other.jev_key() == "other" and other.runs(1)
+    with TriageStore(other.dir / "context.db") as store:
+        assert store.get_cursor("b@example.org") == "2"
+    assert (EMAIL, "m") not in app.summaries and ("b@example.org", "n") in app.summaries
+    assert "old" not in app.ext_codes and "other" in app.ext_codes
+    assert EMAIL not in app.ext_syncs and "b@example.org" in app.ext_syncs
     assert app.session_emails({"HTTP_COOKIE": headers["Set-Cookie"].split(";")[0]}) == ["b@example.org"]
+    # An older cookie for the removed account cannot recreate its state or write settings.
+    state = call(app, "GET", "/api/state", cookie=cookie)[2]
+    assert isinstance(state, dict) and state["accounts"][0]["connected"] is False
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True}, cookie)[0] == 409
+    assert not acct.dir.exists()
+
+
+def test_disconnect_failure_keeps_token_and_session_for_retry(app, monkeypatch):
+    cookie = signed_in(app)
+    acct = Account(app.state_dir, EMAIL)
+    acct.save_jev_key("synthetic")
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    def failed_remove(path):
+        raise OSError("simulated removal failure")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(webapp.shutil, "rmtree", failed_remove)
+        status, headers, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)
+    assert status == 500 and "Set-Cookie" not in headers
+    assert acct.jev_key() == "synthetic"
+    assert (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)[0] == 200
+    assert not acct.dir.exists()
+
+
+def test_disconnect_refuses_active_account_lock(app, monkeypatch):
+    from inbox_triage.runner import account_lock_path
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    acct = Account(app.state_dir, EMAIL)
+    with account_lock(account_lock_path(app.state_dir, EMAIL)):
+        status, _, _ = call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))
+        assert status == 409
+        assert (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+
+
+def test_inflight_extension_code_cannot_recreate_deleted_account(app, monkeypatch):
+    import time
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    app.ext_codes["pending"] = {"email": EMAIL, "created": time.time(),
+                                 "redirect_uri": "test", "challenge": "synthetic"}
+    def disconnect_during_verification(*args):
+        app.forget_account(EMAIL)
+        return True
+    monkeypatch.setattr(webapp.ext, "pkce_matches", disconnect_during_verification)
+    status, _, _ = call(app, "POST", "/api/ext/token", {"code": "pending", "redirect_uri": "test"})
+    assert status == 409
+    from inbox_triage.runner import scoped_directory
+    assert not scoped_directory(app.state_dir, EMAIL).exists()
+
+
+@pytest.mark.parametrize("action,body,hook", [
+    ("settings", {"onboarded": True}, "update_settings"),
+    ("preferences", {"rules": []}, "save_preferences"),
+    ("jev-key", {"key": ""}, "save_jev_key"),
+])
+def test_disconnect_cannot_interleave_account_write(app, monkeypatch, action, body, hook):
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    original = getattr(Account, hook)
+    statuses = []
+    def during_write(acct, *args, **kwargs):
+        statuses.append(call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0])
+        return original(acct, *args, **kwargs)
+    monkeypatch.setattr(Account, hook, during_write)
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/{action}", body, signed_in(app))[0] == 200
+    assert statuses == [409]
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+    assert not Account(app.state_dir, EMAIL).dir.joinpath({"settings": "settings.json", "preferences": "preferences.json", "jev-key": "secrets.json"}[action]).exists()
+
+
+def test_extension_authorize_cannot_recreate_account_during_disconnect(app, monkeypatch):
+    import base64
+    import hashlib
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    original = Account.update_settings
+    statuses = []
+    def during_write(acct, changes, *args, **kwargs):
+        statuses.append(call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0])
+        return original(acct, changes, *args, **kwargs)
+    monkeypatch.setattr(Account, "update_settings", during_write)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(b"v" * 64).digest()).decode().rstrip("=")
+    body = {"redirect_uri": "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/cb",
+            "state": "long-state", "code_challenge": challenge, "email": EMAIL}
+    assert call(app, "POST", "/api/ext/authorize", body, signed_in(app))[0] == 200
+    assert statuses == [409]
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+    assert not Account(app.state_dir, EMAIL).dir.joinpath("settings.json").exists()
+
+
+def test_oauth_callback_started_before_disconnect_cannot_reauthorize(app, monkeypatch):
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    _, _, data = call(app, "POST", "/api/login", {})  # no hint: identity only known after exchange
+    state = data["url"].split("state=")[1].split("&")[0]
+    credentials = SimpleNamespace(granted_scopes=[oauth.SCOPE], token="synthetic", to_json=lambda: "{}")
+    def exchange(*args):
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+        return credentials
+    monkeypatch.setattr(oauth, "exchange", exchange)
+    monkeypatch.setattr(oauth, "profile_email", lambda creds: EMAIL)
+    status, headers, _ = call(app, "GET", f"/oauth/callback?state={state}&code=abc")
+    assert status == 302 and "error=" in headers["Location"]
+    assert "Set-Cookie" not in headers
+    assert not (app.config_dir / "tokens" / f"{EMAIL}.json").exists()
+
+
+def test_runner_lock_survives_account_directory_deletion(app, monkeypatch):
+    from inbox_triage.runner import account_lock_path, scoped_directory
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    path = account_lock_path(app.state_dir, EMAIL)
+    directory = scoped_directory(app.state_dir, EMAIL)
+    with account_lock(path):
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 409
+        import shutil
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir()
+        with pytest.raises(RuntimeError, match="already running"):
+            with account_lock(account_lock_path(app.state_dir, EMAIL)):
+                pass
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+
+
+def test_multi_batch_runner_keeps_disconnect_out_until_history_recorded(app, monkeypatch):
+    from inbox_triage import runner
+    from inbox_triage.runner import scoped_directory
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    attempts = []
+    def fake_batch(*args, **kwargs):
+        attempts.append(call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0])
+        return {"processed": 0, "remaining": False, "mode": "dry-run"}
+    monkeypatch.setattr(runner, "run", fake_batch)
+    result = accounts.run_account(EMAIL, app.state_dir, runner_kwargs={"token": app.config_dir / "tokens" / f"{EMAIL}.json"})
+    assert result["status"] == "ok" and attempts == [409]
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+    assert not scoped_directory(app.state_dir, EMAIL).exists()
+
+
+def test_dashboard_state_reads_during_run_without_allowing_delete(app, monkeypatch):
+    from inbox_triage import runner
+    cookie = signed_in(app)
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    def batch(*args, **kwargs):
+        status, _, state = call(app, "GET", "/api/state", cookie=cookie)
+        assert status == 200 and state["accounts"][0]["connected"]
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=cookie)[0] == 409
+        return {"processed": 0, "remaining": False}
+    monkeypatch.setattr(runner, "run", batch)
+    assert accounts.run_account(EMAIL, app.state_dir)["status"] == "ok"
+
+
+def test_delayed_job_after_disconnect_does_not_recreate_account(app, monkeypatch):
+    from inbox_triage.runner import scoped_directory
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    class DelayedThread:
+        def __init__(self, *, target, args, daemon):
+            pass
+        def start(self):
+            pass
+    monkeypatch.setattr(webapp.threading, "Thread", DelayedThread)
+    app.start_job(EMAIL, None, False, "manual")
+    job = app.jobs[EMAIL]
+    other = webapp.App(config_dir=app.config_dir, state_dir=app.state_dir)
+    other.forget_account(EMAIL)
+    assert not scoped_directory(app.state_dir, EMAIL).exists()
+    app._run_job(job, None, False, "manual")
+    assert not scoped_directory(app.state_dir, EMAIL).exists()
+    assert app.fake_runs == [] and job.status == "error"
+
+
+def test_oauth_callback_during_run_does_not_exchange_one_time_code(app, monkeypatch):
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
+    state = call(app, "POST", "/api/login", {"email": EMAIL})[2]["url"].split("state=")[1].split("&")[0]
+    exchanged = []
+    monkeypatch.setattr(oauth, "exchange", lambda *args: exchanged.append(args))
+    with account_lock(account_lock_path(app.state_dir, EMAIL)):
+        status, headers, _ = call(app, "GET", f"/oauth/callback?state={state}&code=once")
+        assert status == 302 and "error=" in headers["Location"]
+        assert not exchanged
+    assert state in app.pending
+    assert _finish_login(app, monkeypatch, state, EMAIL)[0] == 302
+
+
+def test_pre_disconnect_extension_code_stays_invalid_after_reconnect_across_apps(app, monkeypatch):
+    from test_extension_api import authorize, VERIFIER, REDIRECT
+    from urllib.parse import parse_qs, urlparse
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    other = webapp.App(config_dir=app.config_dir, state_dir=app.state_dir)
+    code = parse_qs(urlparse(authorize(other, signed_in(other))[2]["redirect"]).query)["code"][0]
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+    (app.config_dir / "tokens" / f"{EMAIL}.json").write_text("{}")
+    status, _, _ = call(other, "POST", "/api/ext/token",
+                        {"code": code, "redirect_uri": REDIRECT, "code_verifier": VERIFIER})
+    assert status != 200
+
+
+def test_job_start_cannot_resurrect_deleted_account(app, monkeypatch):
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    original = app.jev_access
+    def disconnect_during_setup(acct, *args):
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 409
+        return original(acct, *args)
+    monkeypatch.setattr(app, "jev_access", disconnect_during_setup)
+    app.start_job(EMAIL, None, False, "schedule")
+
+
+def test_token_unlink_failure_keeps_account_fenced(app, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(oauth, "revoke", lambda path: None)
+    original = Path.unlink
+    def fail_token(path, *args, **kwargs):
+        if path == app.config_dir / "tokens" / f"{EMAIL}.json":
+            raise OSError("unlink failed")
+        return original(path, *args, **kwargs)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Path, "unlink", fail_token)
+        assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 500
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True}, signed_in(app))[0] == 409
+    from inbox_triage.runner import scoped_directory
+    assert not scoped_directory(app.state_dir, EMAIL).exists()
+    assert call(app, "DELETE", f"/api/accounts/{EMAIL}", cookie=signed_in(app))[0] == 200
+
+
+def test_other_account_remains_writable_while_first_account_is_locked(app):
+    token = app.config_dir / "tokens" / "b@example.org.json"
+    token.write_text("{}")
+    with account_lock(account_lock_path(app.state_dir, EMAIL)):
+        assert call(app, "PUT", "/api/accounts/b@example.org/settings", {"onboarded": True},
+                    signed_in(app, ("b@example.org",)))[0] == 200
+        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True},
+                    signed_in(app))[0] == 409
+    assert Account(app.state_dir, "b@example.org").settings()["onboarded"]
 
 
 def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
