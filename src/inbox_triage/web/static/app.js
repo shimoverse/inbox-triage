@@ -445,7 +445,7 @@ function renderLanding() {
         el("span", { class: "eyebrow" }, "Chrome and Brave extension"),
         el("h2", { class: "h-big", id: "extension-h" }, "See your triage right in Gmail."),
         el("p", {}, "The optional extension shows your label counts in Gmail and asks your connected server to check for new mail. It does not hold your Google token or an AI key."),
-        el("p", { class: "extension-status", role: "status" }, "Chrome Web Store download is not available yet; the unlisted beta is awaiting review."),
+        el("p", { class: "extension-status", role: "status" }, "Chrome Web Store download is not available yet; the public listing is awaiting review."),
         el("a", { class: "btn", href: "https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md", target: "_blank", rel: "noopener" }, "View extension and developer setup instructions"))),
     el("section", { class: "section", id: "how", "aria-labelledby": "how-h" },
       el("h2", { class: "h-big", id: "how-h" }, `${STATE.jev.sponsored ? "Two" : "Three"} steps, then it runs on its own`),
