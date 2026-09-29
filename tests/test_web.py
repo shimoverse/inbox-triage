@@ -719,16 +719,16 @@ def test_free_beta_turns_new_people_away_before_google(app, monkeypatch):
     # "Continue with Google" is refused before Google's consent screen, so none of Google's
     # 100 lifetime sign-ins for an unverified app is spent on a new person.
     status, _, data = call(app, "POST", "/api/login", {})
-    assert status == 409 and "beta is full" in data["error"] and "specific account" in data["error"]
+    assert status == 409 and "hosted access is full" in data["error"] and "specific account" in data["error"]
     # A typed address goes on to Google whether or not it has an account here: the answer never
     # reveals who uses this server. Anyone who isn't a member is turned away after Google.
     assert call(app, "POST", "/api/login", {"email": "third@example.org"})[0] == 200
     assert call(app, "POST", "/api/login", {"email": EMAIL})[0] == 200
     status, headers, _ = _sign_in_via_callback(app, monkeypatch, "third@example.org")
-    assert "beta%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org"]
+    assert "hosted%20access%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org"]
     # Someone already at Google when the beta filled is turned away too, and the fresh grant revoked.
     status, headers, _ = _finish_login(app, monkeypatch, late, "late@example.org")
-    assert "beta%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org", "rt-late@example.org"]
+    assert "hosted%20access%20is%20full" in headers["Location"] and revoked == ["rt-third@example.org", "rt-late@example.org"]
     assert not (app.config_dir / "tokens" / "late@example.org.json").exists()
     # Existing users can always sign back in.
     status, headers, _ = _sign_in_via_callback(app, monkeypatch, EMAIL)

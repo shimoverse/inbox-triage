@@ -10,13 +10,11 @@ The extension is submitted for review as a **Public** listing with automatic pub
 - **Short description (manifest):** A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.
 - **Detailed description:**
 
-  THIS EXTENSION IS FOR BETA TESTING. Access is limited during the beta, and the hosted service may change as we improve it.
-
   Inbox Triage adds a dashboard above Gmail with seven-day counts for its labels, a daily activity chart, and recently labeled messages. Click a label count to open that label in Gmail. While Gmail is open, the extension asks your connected Inbox Triage server to check for new mail when the unread count rises; the server also runs on a schedule.
 
   To start, open Gmail, click Connect Gmail in the dashboard, sign in on the Inbox Triage server, and approve Gmail access. The extension itself does not read message bodies from Gmail's page or hold a Google OAuth token or an AI API key. The server reads mail through the Gmail API and applies labels after the separate Google authorization. The dashboard receives label counts and recent senders and subjects from that server. No messages are sent, deleted, archived, marked read, or moved to Spam by Inbox Triage.
 
-  Hosted beta access may be limited and Google's OAuth consent may display an unverified-app warning. You can also point the extension at your own Inbox Triage server in its settings. Chrome and Brave are supported, subject to browser testing before distribution.
+  Hosted access is limited to the first 90 accounts, and Google's OAuth consent may display an unverified-app warning. You can also point the extension at your own Inbox Triage server in its settings. Chrome and Brave are supported.
 
 - **Support/homepage:** https://triage.shimoverse.com/ (confirm reachable and current before entering)
 - **Privacy policy:** https://triage.shimoverse.com/privacy (confirm reachable, correct operator/support contact, deletion/backup details, and Chrome Web Store Limited Use statement after deployment before entering)
@@ -42,9 +40,9 @@ The extension is submitted for review as a **Public** listing with automatic pub
 - **Still needed:** at least one genuine 1280×800 or 640×400 screenshot of the working extension in Gmail, using a synthetic/test mailbox with no real personal data. Do not substitute a mockup for an app screenshot. Check against current dashboard requirements when uploading. Optional marquee and video only if requested/available.
 - Before review: verify Gmail bar placement, Chrome and Brave `launchWebAuthFlow`, hosted `/privacy`, server availability, account capacity and tester instructions. Do not give reviewer private credentials in this repo.
 
-## Stable ID and beta migration — no private key in the repository
+## Stable ID and installation migration — no private key in the repository
 
-The existing unpacked installation has ID `leagpjpjajkpjaiegjjenjnlegffkofj`. The hosted server currently allowlists that ID. **Do not add an arbitrary manifest `key` now:** that would change its ID and strand the connected unpacked beta. The source `manifest.json` deliberately has no `key` until a Chrome Web Store item has been created; its folder-derived unpacked ID is not evidence of a reusable public key.
+The existing unpacked installation has ID `leagpjpjajkpjaiegjjenjnlegffkofj`. The hosted server currently allowlists that ID. **Do not add an arbitrary manifest `key` now:** that would change its ID and strand the connected unpacked installation. The source `manifest.json` deliberately has no `key` until a Chrome Web Store item has been created; its folder-derived unpacked ID is not evidence of a reusable public key.
 
 1. Zip only the contents of `extension/` (with `manifest.json` at archive root), excluding `test/`, `STORE_BETA.md`, `store-assets/`, local credentials, `.pem` files and private data. Upload as a **draft item only**, without submitting for review or publishing. This requires the developer account. Chrome Web Store allocates the item's permanent ID at this step. Do **not** upload a local private key or `key.pem`.
 2. On the draft item's **Package → View public key**, copy the base64 text between the PEM headers and remove line breaks. This is the **public** key, not a private key. Set `"key": "<public-key-base64>"` in the development manifest, or in a separate local unpacked copy. Confirm the ID shown at `chrome://extensions` equals the draft item's ID before using that copy for testing. Keep the uploaded package and future store updates free of private keys. The public manifest key is for matching the store ID in unpacked development; the published item keeps its store-assigned ID automatically. If the dashboard rejects a manifest containing `key` on an update, strip only that public field from the upload copy, leaving the development copy intact.

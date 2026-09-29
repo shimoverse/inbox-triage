@@ -222,7 +222,7 @@ function problem(lead, raw) {
 function pauseCause(r, a) {
   if (r?.reason === "sponsored_limit") return "Today's free sorting allowance for this account is used up";
   if (r?.reason === "jev_credits") return a?.own_jev_key ? "Your Jev key is out of credits. Add credits with its provider"
-    : "The free beta's shared Jev budget is used up for now";
+    : "The shared free Jev allowance is used up for now";
   return "Gmail asked Inbox Triage to slow down";
 }
 const pauseShort = (r) => r?.reason === "sponsored_limit" ? "daily allowance used"
@@ -293,8 +293,8 @@ function betaBanner() {
   if (!slot) return;
   if (!b || !b.enabled) return fill(slot);
   const until = b.ends ? new Date(b.ends + "T00:00:00").toLocaleDateString(undefined, { dateStyle: "long" }) : null;
-  const parts = [b.ended ? "The free beta has ended"
-    : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "user" : `${b.max_accounts} users`}` : "Free beta"];
+  const parts = [b.ended ? "Free hosted access has ended"
+    : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "user" : `${b.max_accounts} users`}` : "Free hosted access"];
   if (until && !b.ended) parts[0] += ` until ${until}`;
   parts.push(STATE.jev.sponsored ? "No API key needed" : "Bring your own Jev key");
   fill(slot, parts.map((p) => el("span", {}, p + " ·")),
@@ -1214,7 +1214,7 @@ function settingsPane(a) {
         el("label", { class: "switch-row plain", for: "pm" }, preview, previewText)),
       setrow("set-jev", "Jev", "Makes every sorting decision.",
         el("div", { class: "row between" },
-          STATE.jev.sponsored && !a.own_jev_key ? el("span", { class: "conn ok" }, "Included in the free beta")
+          STATE.jev.sponsored && !a.own_jev_key ? el("span", { class: "conn ok" }, "Included with free hosted access")
             : a.jev_connected ? el("span", { class: "conn ok" }, "Connected") : el("span", { class: "conn warn" }, "Not connected"),
           el("button", { class: "btn", type: "button", onclick: changeKey },
             STATE.jev.sponsored && !a.own_jev_key ? "Use my own key" : a.jev_connected ? "Change key" : "Connect Jev")),

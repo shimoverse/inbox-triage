@@ -50,7 +50,7 @@ function signInCard(email, errorText, go) {
       el("p", { class: "lead" }, email ? ["Sign in with Google as ", el("b", {}, email), " to show your dashboard in Gmail."]
         : "Sign in with Google to show your dashboard in Gmail.")),
     problem(errorText),
-    el("p", { class: "small muted" }, "During the free beta, Google shows “Google hasn't verified this app”. " +
+    el("p", { class: "small muted" }, "Google may show “Google hasn't verified this app”. " +
       "Choose Advanced, then continue to Inbox Triage. It only ever adds and removes its own labels."),
     go ? el("div", { class: "row" }, el("button", { class: "btn primary", type: "button", onclick: go }, "Continue with Google")) : null,
   ];

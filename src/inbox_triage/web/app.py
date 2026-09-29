@@ -41,7 +41,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EXT_CORS_PATHS = {"/api/ext/token", "/api/ext/summary", "/api/ext/sync"}
 # Only the extension's connect page, and only characters a URL query may hold (no spaces, CR/LF or #).
 NEXT_RE = re.compile(r"/connect\?[A-Za-z0-9_\-.~%&=+:/@!$'()*,;]*")
-BETA_FULL = ("The free beta is full. Inbox Triage is open source, so you can run it yourself: "
+BETA_FULL = ("Free hosted access is full. Inbox Triage is open source, so you can run it yourself: "
              "github.com/shimoverse/inbox-triage")
 
 

@@ -20,11 +20,11 @@ The extension only draws the dashboard; the server does all the reading and labe
 2. Load the extension:
    - **Chrome:** open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose this `extension` folder.
    - **Brave:** open `brave://extensions` and do the same.
-3. Check the server address. The extension points at the hosted beta, `https://triage.shimoverse.com`, by default. If you run your own server, click the extension's icon to open its settings and enter its address: `http://127.0.0.1:8765` on this computer, or your server's `https://` address.
+3. Check the server address. The extension points at the hosted service, `https://triage.shimoverse.com`, by default. If you run your own server, click the extension's icon to open its settings and enter its address: `http://127.0.0.1:8765` on this computer, or your server's `https://` address.
 4. Open Gmail and click **Connect Gmail** in the Inbox Triage bar.
    - A window opens on your server's connect page.
    - Sign in with Google if you aren't already, then click **Connect**.
-   - During the free beta, Google first shows *"Google hasn't verified this app"*: choose **Advanced**, then continue.
+   - Google may show *"Google hasn't verified this app"*: choose **Advanced**, then continue.
 
 After that, the bar fills in, and new mail is labeled within about a minute while Gmail is open. The rest of the time the server's schedule labels it (hourly for accounts connected from the extension).
 
@@ -41,7 +41,7 @@ The server is reached from the service worker through CORS with a bearer token, 
 ## For operators
 
 - **List your extension's ID on the hosted server.** A hosted server hands tokens only to listed extensions: set `INBOX_TRIAGE_EXTENSION_IDS=<id>[,<id>…]`. Find the ID on `chrome://extensions`. A server running on `127.0.0.1` accepts any extension, but still asks the person to click **Connect**.
-- **Keep the store ID stable without exposing a signing key.** Create a draft Chrome Web Store item, copy its **public** key from Package → View public key into the development manifest's `"key"` field, and check that the unpacked ID matches the store item. Do not put a private key in the package or repo. The current unpacked beta ID `leagpjpjajkpjaiegjjenjnlegffkofj` must remain on the server allowlist until those testers move to the store build; a new manifest key would change their unpacked ID. See [the store beta worksheet](STORE_BETA.md#stable-id-and-beta-migration--no-private-key-in-the-repository).
+- **Keep the store ID stable without exposing a signing key.** Create a draft Chrome Web Store item, copy its **public** key from Package → View public key into the development manifest's `"key"` field, and check that the unpacked ID matches the store item. Do not put a private key in the package or repo. The current unpacked build ID `leagpjpjajkpjaiegjjenjnlegffkofj` must remain on the server allowlist until those testers move to the store build; a new manifest key would change their unpacked ID. See [the store listing worksheet](STORE_BETA.md#stable-id-and-installation-migration--no-private-key-in-the-repository).
 - **Set the default server.** Put your server's address in `config.js` before packaging, so people don't have to type it.
 - **Publish as Public in the Chrome Web Store.** Brave installs from there too. Review can take from a few days to a few weeks; a submitted item is not downloadable until approved.
   - In the store's privacy form, declare *authentication information*, *personal communications* (recent senders and subjects), and *personally identifiable information* (Gmail account address). See [the listing and privacy worksheet](STORE_BETA.md); capture a real, privacy-safe Gmail screenshot before submitting.
