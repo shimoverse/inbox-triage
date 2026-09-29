@@ -1,10 +1,10 @@
-# Unlisted Chrome Web Store beta — operator worksheet
+# Chrome Web Store release — operator worksheet
 
-This is copy and a release checklist, **not a submitted listing**. Do not publish or invite testers until the hosted service and the Chrome/Brave sign-in flow have been checked. The store requires a developer account and review; Unlisted means link-only discovery, not exemption from review.
+The extension is submitted for review as a **Public** listing with automatic publication after approval. This worksheet records the intended copy and privacy declarations; verify the live dashboard before each update. The hosted service still has a limited-account rollout and Google's Gmail OAuth verification is separate from Web Store review.
 
 ## Listing
 
-- **Name:** Inbox Triage BETA (the beta package's manifest uses the same name; rename for a later production release).
+- **Name:** Inbox Triage (the package manifest uses the same name).
 - **Category:** Productivity
 - **Language:** English
 - **Short description (manifest):** A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.
@@ -20,7 +20,7 @@ This is copy and a release checklist, **not a submitted listing**. Do not publis
 
 - **Support/homepage:** https://triage.shimoverse.com/ (confirm reachable and current before entering)
 - **Privacy policy:** https://triage.shimoverse.com/privacy (confirm reachable, correct operator/support contact, deletion/backup details, and Chrome Web Store Limited Use statement after deployment before entering)
-- **Distribution:** Unlisted; free; choose supported regions deliberately. No paid features are sold by the extension.
+- **Distribution:** Public; free; choose supported regions deliberately. No paid features are sold by the extension.
 
 ## Privacy tab — proposed answers to verify against the actual dashboard wording
 

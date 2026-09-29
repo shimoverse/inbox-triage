@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Inbox Triage BETA",
-  "version": "0.1.0",
+  "name": "Inbox Triage",
+  "version": "0.1.1",
   "description": "A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "identity"],

@@ -43,8 +43,7 @@ The server is reached from the service worker through CORS with a bearer token, 
 - **List your extension's ID on the hosted server.** A hosted server hands tokens only to listed extensions: set `INBOX_TRIAGE_EXTENSION_IDS=<id>[,<id>…]`. Find the ID on `chrome://extensions`. A server running on `127.0.0.1` accepts any extension, but still asks the person to click **Connect**.
 - **Keep the store ID stable without exposing a signing key.** Create a draft Chrome Web Store item, copy its **public** key from Package → View public key into the development manifest's `"key"` field, and check that the unpacked ID matches the store item. Do not put a private key in the package or repo. The current unpacked beta ID `leagpjpjajkpjaiegjjenjnlegffkofj` must remain on the server allowlist until those testers move to the store build; a new manifest key would change their unpacked ID. See [the store beta worksheet](STORE_BETA.md#stable-id-and-beta-migration--no-private-key-in-the-repository).
 - **Set the default server.** Put your server's address in `config.js` before packaging, so people don't have to type it.
-- **Publish as Unlisted in the Chrome Web Store** for a beta. Brave installs from there too.
-  - Unlisted listings get the same review as public ones, and review can take from a few days to a few weeks, so submit early.
+- **Publish as Public in the Chrome Web Store.** Brave installs from there too. Review can take from a few days to a few weeks; a submitted item is not downloadable until approved.
   - In the store's privacy form, declare *authentication information*, *personal communications* (recent senders and subjects), and *personally identifiable information* (Gmail account address). See [the listing and privacy worksheet](STORE_BETA.md); capture a real, privacy-safe Gmail screenshot before submitting.
 
 ## Tests
