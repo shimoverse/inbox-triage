@@ -57,6 +57,14 @@ def test_static_page_has_strict_csp(app):
     assert call(app, "GET", "/static/../app.py")[0] == 404
 
 
+def test_extension_option_does_not_claim_unavailable_store_download(app):
+    status, _, script = call(app, "GET", "/static/app.js")
+    assert status == 200
+    assert b"Chrome and Brave extension" in script
+    assert b"Chrome Web Store download is not available yet" in script
+    assert b"https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md" in script
+
+
 def test_static_ui_stays_within_the_csp(app):
     # The CSP has no 'unsafe-inline': no inline styles or scripts, and the UI never parses HTML strings.
     csp = call(app, "GET", "/")[1]["Content-Security-Policy"]

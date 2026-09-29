@@ -440,6 +440,13 @@ function renderLanding() {
           "so you can see at a glance what to open first.")),
       el("ul", { class: "label-cards" }, ATTENTION.map((k) => el("li", {}, pill(k, true), el("p", {}, LABELS[k].help)))),
       el("p", { class: "note-line" }, pill("shopping"), "is added to orders and deliveries too. Anything Jev isn't sure about stays unlabeled."))),
+    el("section", { class: "section extension-section", "aria-labelledby": "extension-h" },
+      el("div", { class: "intro" },
+        el("span", { class: "eyebrow" }, "Chrome and Brave extension"),
+        el("h2", { class: "h-big", id: "extension-h" }, "See your triage right in Gmail."),
+        el("p", {}, "The optional extension shows your label counts in Gmail and asks your connected server to check for new mail. It does not hold your Google token or an AI key."),
+        el("p", { class: "extension-status", role: "status" }, "Chrome Web Store download is not available yet; the unlisted beta is awaiting review."),
+        el("a", { class: "btn", href: "https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md", target: "_blank", rel: "noopener" }, "View extension and developer setup instructions"))),
     el("section", { class: "section", id: "how", "aria-labelledby": "how-h" },
       el("h2", { class: "h-big", id: "how-h" }, `${STATE.jev.sponsored ? "Two" : "Three"} steps, then it runs on its own`),
       el("ol", { class: "steps3" }, howSteps().map(([title, text], i) =>
