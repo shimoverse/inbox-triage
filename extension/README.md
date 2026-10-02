@@ -26,15 +26,17 @@ The extension only draws the dashboard; the server does all the reading and labe
    - Sign in with Google if you aren't already, then click **Connect**.
    - Google may show *"Google hasn't verified this app"*: choose **Advanced**, then continue.
 
-After that, the bar fills in, and new mail is labeled within about a minute while Gmail is open. The rest of the time the server's schedule labels it (hourly for accounts connected from the extension).
+After that, the bar fills in, and new mail is labeled within about a minute while Gmail is open. The rest of the time the server's schedule labels it (hourly, if the account hasn't chosen a schedule on the website yet).
+
+If you sign in as a different Google account than the Gmail tab shows, the extension hands that token back and asks you to connect again with the right account. The extension needs Chrome 116 or newer; from Chrome 130 its tokens are also kept out of reach of content scripts.
 
 ## Permissions
 
 | Permission | Why |
 |---|---|
-| `mail.google.com` (content script) | Draws the bar and reads the tab title to know which account is open and when unread mail arrives. It doesn't read emails. Chrome's install warning says *"Read and change your data on mail.google.com"*. |
+| `mail.google.com/mail/*` (content script) | Draws the bar and reads the tab title to know which account is open and when unread mail arrives. It doesn't read emails, and it stays out of Google Chat and popout compose or print windows. Chrome's install warning says *"Read and change your data on mail.google.com"*. |
 | `identity` | `chrome.identity.launchWebAuthFlow` signs in through your server. It works in Chrome and Brave, unlike `getAuthToken`, which Brave doesn't support. No install warning. |
-| `storage` | Keeps the server address, the tokens (out of reach of content scripts where the browser allows) and whether the bar is expanded. No install warning. |
+| `storage` | Keeps the server address, the tokens (out of reach of content scripts from Chrome 130) and whether the bar is expanded. No install warning. |
 
 The server is reached from the service worker through CORS with a bearer token, so its domain needs no host permission and doesn't appear in the install warning.
 

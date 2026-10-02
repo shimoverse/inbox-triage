@@ -18,11 +18,11 @@ Jev by TypeSafe is a **System One model**. It doesn't write text; it makes fast,
 - What category is it?
 - Is it about shopping?
 
-Fixed local rules turn those answers into at most one attention label, plus a Shopping topic label when that applies. TypeSafe quotes about 0.1 s and a small fraction of a cent per decision, and the dashboard shows the number of Jev decisions and their average latency for every run.
+Fixed local rules turn those answers into at most one attention label, plus a Shopping topic label when that applies. TypeSafe quotes about 0.1 s and a small fraction of a cent per decision, and the dashboard shows the number of Jev decisions and their average latency for the last run.
 
 **Jev runs through OpenRouter or TypeSafe.** OpenRouter sells Jev directly (`jev-latest`, $0.042 per million input tokens, output free), so one [OpenRouter key](https://openrouter.ai/keys) is enough, and no TypeSafe account is needed. A TypeSafe key from [console.typesafe.ai](https://console.typesafe.ai/) works too. Inbox Triage sends about 1,500 tokens per email, roughly $0.00006.
 
-On the hosted app, a user's own key is used only for their own mailbox. The server pays for users' Jev calls only when its operator sponsors free access, and then only up to a daily limit per account (see [docs/hosting.md](docs/hosting.md#5-sponsored-beta-the-operator-pays-for-jev)).
+On the hosted app, a user's own key is used only for their own mailbox. The server pays for users' Jev calls only when its operator sponsors free access, and then only up to a daily limit per account (see [docs/hosting.md](docs/hosting.md#5-sponsored-access-the-operator-pays-for-jev)).
 
 ```mermaid
 flowchart LR
@@ -97,7 +97,7 @@ uv run inbox-triage --all --days 30                       # backfill 30 days for
 - a chart of mail labeled per day;
 - what was labeled recently.
 
-It asks the server to sort new mail as it arrives, so labels appear within about a minute while Gmail is open. The extension only draws the dashboard: it holds no Google token and no AI key, and signs in through your server with `launchWebAuthFlow`, which works in both Chrome and Brave. See [extension/README.md](extension/README.md) to load it.
+It asks the server to sort new mail as it arrives, so labels appear within about a minute while Gmail is open. The extension only draws the dashboard: it holds no Google token and no AI key, and signs in through your server with `launchWebAuthFlow`, which works in both Chrome and Brave. It needs Chrome 116 or newer. See [extension/README.md](extension/README.md) to load it.
 
 ## The optional notes assistant
 

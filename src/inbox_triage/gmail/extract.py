@@ -67,7 +67,27 @@ def clean_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 def _headers(payload: dict) -> dict[str, str]:
-    return {str(h.get("name", "")).lower(): str(h.get("value", "")) for h in payload.get("headers", [])}
+    """One value per header name: the first occurrence wins, which is the one Gmail added (Gmail prepends
+    its own headers), so a sender can't override it by repeating the header lower down."""
+    out: dict[str, str] = {}
+    for h in payload.get("headers", []):
+        out.setdefault(str(h.get("name", "")).lower(), str(h.get("value", "")))
+    return out
+
+
+GMAIL_AUTHSERV = "mx.google.com"
+
+
+def gmail_auth_results(payload: dict) -> str:
+    """Gmail's own ``Authentication-Results`` verdict (authserv-id ``mx.google.com``). Any other such header,
+    whether the sender forged one or an upstream relay added one, is ignored: only Gmail's SPF, DKIM and
+    DMARC verdicts may unlock sender rules, purchase history and the "authenticated" policy gate."""
+    for h in payload.get("headers", []):
+        if str(h.get("name", "")).lower() == "authentication-results":
+            value = str(h.get("value", ""))
+            if value.strip().lower().startswith(GMAIL_AUTHSERV):
+                return value
+    return ""
 
 def _charset(part: dict) -> str:
     for h in part.get("headers", []):
@@ -102,7 +122,7 @@ def extract_gmail_message(message: dict, attachment_fetcher: Callable[[str], str
     sender = headers.get("from", "")
     address = parseaddr(sender)[1].lower()
     domain = address.rsplit("@", 1)[-1] if "@" in address else ""
-    auth_raw = headers.get("authentication-results", "").lower()
+    auth_raw = gmail_auth_results(payload).lower()
     auth = {k: (m.group(1) if (m := re.search(rf"\b{k}=(pass|fail|softfail|neutral|none|temperror|permerror)", auth_raw)) else "unknown") for k in ("spf", "dkim", "dmarc")}
     precedence = headers.get("precedence", "").lower()
     bulk = bool(headers.get("list-id") or precedence in {"bulk", "list", "junk"})

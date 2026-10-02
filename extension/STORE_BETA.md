@@ -14,7 +14,9 @@ The extension is submitted for review as a **Public** listing with automatic pub
 
   To start, open Gmail, click Connect Gmail in the dashboard, sign in on the Inbox Triage server, and approve Gmail access. The extension itself does not read message bodies from Gmail's page or hold a Google OAuth token or an AI API key. The server reads mail through the Gmail API and applies labels after the separate Google authorization. The dashboard receives label counts and recent senders and subjects from that server. No messages are sent, deleted, archived, marked read, or moved to Spam by Inbox Triage.
 
-  Hosted access is limited to the first 90 accounts, and Google's OAuth consent may display an unverified-app warning. You can also point the extension at your own Inbox Triage server in its settings. Chrome and Brave are supported.
+  Google's OAuth consent may display an unverified-app warning. You can also point the extension at your own Inbox Triage server in its settings. Chrome and Brave are supported.
+
+  (Keep the account limit out of the store text: the listing is reviewed and cached, while the live banner on the website always shows the current limit.)
 
 - **Support/homepage:** https://triage.shimoverse.com/ (confirm reachable and current before entering)
 - **Privacy policy:** https://triage.shimoverse.com/privacy (confirm reachable, correct operator/support contact, deletion/backup details, and Chrome Web Store Limited Use statement after deployment before entering)

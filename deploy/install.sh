@@ -52,9 +52,12 @@ PUBLIC_URL=https://$DOMAIN
 # Shown on https://$DOMAIN/privacy (the privacy policy URL for Google's consent screen):
 INBOX_TRIAGE_SUPPORT_EMAIL=
 INBOX_TRIAGE_OPERATOR=
-# Free beta: at most this many accounts (Google also caps unverified apps at 100 users).
-# Leave empty for no limit. Optional: INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD shows an end date in the banner.
-INBOX_TRIAGE_MAX_ACCOUNTS=100
+# Free hosted access: at most this many accounts. Keep it below 100: Google caps an unverified app at
+# 100 people over its lifetime, counting your own test accounts. Leave empty for no limit.
+# Optional: INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD shows an end date in the banner.
+INBOX_TRIAGE_MAX_ACCOUNTS=90
+# Once the extension is public in the Chrome Web Store, its listing URL puts an "Add to Chrome" button on the home page:
+# INBOX_TRIAGE_EXTENSION_STORE_URL=
 # Google OAuth client ("Web application", redirect https://$DOMAIN/oauth/callback). See docs/google-cloud-setup.md
 INBOX_TRIAGE_OAUTH_CLIENT_ID=
 INBOX_TRIAGE_OAUTH_CLIENT_SECRET=

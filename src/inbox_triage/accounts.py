@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
                     "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0, "tz": ""}}
 MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
 MAX_RESUMES = 6  # automatic pick-ups of a run Gmail paused, before waiting for the schedule or a click
+MAX_RUNS_KEPT = 2000  # runs.jsonl is trimmed to this many entries once it grows past twice that
 
 
 def account_dir(root: Path, account: str) -> Path:
@@ -50,11 +51,15 @@ class Account:
             if key in changes:
                 current[key] = bool(changes[key])
         if "schedule" in changes:
-            sched = {**current["schedule"], **(changes["schedule"] or {})}
+            wanted = changes["schedule"] if isinstance(changes["schedule"], dict) else {}
+            sched = {**current["schedule"], **{k: v for k, v in wanted.items() if k in DEFAULT_SETTINGS["schedule"]}}
             if sched.get("frequency") not in FREQUENCIES:
                 raise ValueError("Unknown schedule frequency")
-            sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
-            sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            try:
+                sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
+                sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("The schedule's hour and weekday must be numbers") from None
             # The IANA zone the person picked the hour in (from their browser); unknown zones fall back to server time.
             name = str(sched.get("tz") or "")[:64]
             sched["tz"] = name if schedule_zone({"tz": name}) else ""
@@ -101,6 +106,11 @@ class Account:
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as file:
             file.write(json.dumps(entry, separators=(",", ":"), sort_keys=True) + "\n")
+        # An hourly schedule writes thousands of lines a year; keep the file (and every read of it) bounded.
+        if path.stat().st_size > 100_000:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 2 * MAX_RUNS_KEPT:
+                write_private(path, "\n".join(lines[-MAX_RUNS_KEPT:]) + "\n")
 
     def runs(self, limit: int | None = 50) -> list[dict]:
         """Newest first; ``limit=None`` returns them all."""
@@ -129,7 +139,7 @@ class Account:
     def pending_resume(self) -> dict | None:
         """The latest run, if Gmail paused it and it will be picked up again automatically.
         A preview isn't: it keeps no progress, so resuming would only repeat the same Jev calls."""
-        runs = self.runs(None)
+        runs = self.runs(MAX_RUNS_KEPT)
         if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at") \
                 or runs[0].get("mode") == "dry-run":
             return None
@@ -234,15 +244,16 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
 
 def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
                 since: int | None = None, runner_kwargs: dict | None = None, now: int | None = None,
-                jev_daily_limit: int | None = None) -> dict:
+                jev_daily_limit: int | None = None, _account_locked: bool = False) -> dict:
     """Run triage in batches until the window is done (bounded), and record history.
     A run Gmail throttles is recorded as paused (with when to resume), not as failed.
     A rescan of ``days`` records where its window starts (``since``) so a resume covers the same mail.
     ``jev_daily_limit`` is set when the operator's key pays: past that many Jev calls today (UTC),
     the run pauses until midnight UTC, the same way it pauses for Gmail."""
+    import contextlib
     from . import runner
-    with runner.account_lock(runner.account_lock_path(state_root, account)):
-        token = (runner_kwargs or {}).get("token")
+    lock = contextlib.nullcontext() if _account_locked else runner.account_lock(runner.account_lock_path(state_root, account))
+    with lock:
         if runner.account_lock_path(state_root, account).with_suffix(".deleted").exists():
             raise FileNotFoundError("Account disconnected; reconnect before running")
         return _run_account_locked(account, state_root, trigger=trigger, days=days, since=since,

@@ -1,6 +1,7 @@
 """Web app tests: WSGI calls with fake Gmail/model; no network. Synthetic data only."""
 import io
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -61,7 +62,8 @@ def test_extension_option_does_not_claim_unavailable_store_download(app):
     status, _, script = call(app, "GET", "/static/app.js")
     assert status == 200
     assert b"Chrome and Brave extension" in script
-    assert b"Chrome Web Store download is not available yet" in script
+    # The "Add to Chrome" button only appears when the server supplies the store URL (see extension_store_url).
+    assert b"It isn't in the Chrome Web Store yet" in script and b"STATE.extension?.store_url" in script
     assert b"https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md" in script
 
 
@@ -317,7 +319,8 @@ def test_bad_inputs_are_400_not_500(app):
     cookie = signed_in(app)
     assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": "abc"}, cookie)[0] == 400
     assert call(app, "GET", f"/api/accounts/{EMAIL}/emails?days=abc", cookie=cookie)[0] == 400
-    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": "x"}}, cookie)[0] == 400
+    status, _, data = call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": "x"}}, cookie)
+    assert status == 400 and "invalid literal" not in data["error"] and "must be numbers" in data["error"]
 
 
 def test_each_account_can_bring_its_own_jev_key(app, monkeypatch):
@@ -670,8 +673,9 @@ def test_other_account_remains_writable_while_first_account_is_locked(app):
     with account_lock(account_lock_path(app.state_dir, EMAIL)):
         assert call(app, "PUT", "/api/accounts/b@example.org/settings", {"onboarded": True},
                     signed_in(app, ("b@example.org",)))[0] == 200
-        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True},
-                    signed_in(app))[0] == 409
+        # Saving settings never waits for a run; only starting another run does.
+        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True}, signed_in(app))[0] == 200
+        assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, signed_in(app))[0] == 409
     assert Account(app.state_dir, "b@example.org").settings()["onboarded"]
 
 
@@ -679,9 +683,12 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     monkeypatch.setenv("INBOX_TRIAGE_SUPPORT_EMAIL", "help@example.org")
     status, headers, body = call(app, "GET", "/privacy")
     text = body.decode()
-    assert status == 200 and "help@example.org" in text and "{{" not in text
+    assert status == 200 and 'href="mailto:help@example.org"' in text and "{{" not in text
     assert "Limited Use" in text and "gmail.modify" in text and "Disconnect account" in text
     assert b"<script" not in body
+    monkeypatch.delenv("INBOX_TRIAGE_SUPPORT_EMAIL")
+    text = call(app, "GET", "/privacy")[2].decode()
+    assert "mailto:" not in text and "Contact: the operator." in text and "{{" not in text  # no link to nobody
     index = call(app, "GET", "/")[2].decode()
     assert 'href="/privacy"' in index and "never sends, deletes" in index
 
@@ -953,3 +960,114 @@ def test_resumes_and_run_now_after_a_pause_keep_the_rescan_window(app):
     assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 7}, cookie)[0] == 200
     wait()
     assert app.fake_runs[-1][1]["since"] is None             # different dates: a new window
+
+
+def test_request_bodies_are_bounded_even_with_a_lying_content_length(app):
+    cookie = signed_in(app)
+    big = io.BytesIO(b'{"schedule":{"hour":1}}' + b" " * 2_000_000)
+    environ = {"REQUEST_METHOD": "PUT", "PATH_INFO": f"/api/accounts/{EMAIL}/settings", "QUERY_STRING": "",
+               "HTTP_HOST": "127.0.0.1:8765", "CONTENT_LENGTH": "-1", "wsgi.input": big, "HTTP_COOKIE": cookie,
+               "HTTP_X_REQUESTED_WITH": "inbox-triage"}
+    out = {}
+    app(environ, lambda status, hdrs: out.setdefault("status", status))
+    assert out["status"].startswith("400") and big.tell() == 0  # nothing was read
+
+
+def test_non_finite_numbers_and_unknown_schedule_keys_are_rejected(app):
+    cookie = signed_in(app)
+    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": float("inf")}}, cookie)[0] == 400
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 1e400}, cookie)[0] == 400
+    status, _, saved = call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"frequency": "daily", "junk": "x" * 1000}}, cookie)
+    assert status == 200 and "junk" not in saved["schedule"]
+
+
+def test_pending_logins_are_capped(app, monkeypatch):
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
+    monkeypatch.setattr(webapp, "MAX_PENDING_LOGINS", 20)
+    for _ in range(50):
+        assert call(app, "POST", "/api/login", {})[0] == 200
+    assert len(app.pending) <= 20
+
+
+def test_job_status_is_readable_while_the_run_holds_the_lock(app):
+    cookie = signed_in(app)
+    app.jobs[EMAIL] = webapp.Job(EMAIL, 1)
+    with account_lock(account_lock_path(app.state_dir, EMAIL)):
+        status, _, job = call(app, "GET", f"/api/accounts/{EMAIL}/job", cookie=cookie)
+        assert status == 200 and job["status"] == "running"
+        # Reading history and rules, and saving rules or settings, never wait for the run either.
+        assert call(app, "GET", f"/api/accounts/{EMAIL}/history", cookie=cookie)[0] == 200
+        assert call(app, "GET", f"/api/accounts/{EMAIL}/preferences", cookie=cookie)[0] == 200
+        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"dry_run": True}, cookie)[0] == 200
+        status, _, data = call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, cookie)
+        assert status == 409 and data["error"] == "A run is already in progress"  # not a vague "busy"
+
+
+def test_gmail_errors_while_listing_recent_mail_are_explained_not_internal(app, monkeypatch):
+    from inbox_triage.gmail.client import GmailError
+    class Broken:
+        def profile(self): return {"emailAddress": EMAIL}
+        def list_ids(self, *a, **kw): raise GmailError(403, "", "insufficientPermissions")
+    monkeypatch.setattr(webapp, "GmailClient", lambda token: Broken())
+    status, _, data = call(app, "GET", f"/api/accounts/{EMAIL}/emails", cookie=signed_in(app))
+    assert status == 502 and "HTTP 403 (insufficientPermissions)" in data["error"]
+
+
+def test_concurrent_reads_of_one_account_wait_instead_of_failing(app):
+    """The read gate is short and exclusive; a second reader waits for it rather than getting a 409."""
+    import threading
+    cookie = signed_in(app)
+    gate = account_lock_path(app.state_dir, EMAIL).with_suffix(".read.lock")
+    results = []
+    with account_lock(gate):
+        t = threading.Thread(target=lambda: results.append(call(app, "GET", "/api/state", cookie=cookie)[0]))
+        t.start()
+        t.join(.3)
+        assert t.is_alive() and results == []  # waiting, not refused
+    t.join(5)
+    assert results == [200]
+
+
+def test_run_holds_the_account_lock_for_its_whole_duration(app):
+    """A request taking the run lock while the job thread starts must wait, not make the run fail."""
+    import threading
+    seen = {}
+    def slow_run(account, state_root, **kw):
+        seen["locked_kw"] = kw.get("_account_locked")
+        # While the run goes, the lock must already be held: a non-blocking take fails.
+        try:
+            with account_lock(account_lock_path(state_root, account)):
+                seen["lock_free"] = True
+        except RuntimeError:
+            seen["lock_free"] = False
+        return {"processed": 0, "gmail_changes": 0, "outcomes": {}}
+    app.run_fn = slow_run
+    assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": 7}, signed_in(app))[0] == 200
+    for _ in range(200):
+        if app.jobs[EMAIL].status != "running":
+            break
+        time.sleep(.01)
+    assert app.jobs[EMAIL].status == "ok" and seen == {"locked_kw": True, "lock_free": False}
+
+
+def test_scheduler_tick_survives_one_broken_account(app, monkeypatch):
+    tokens = app.config_dir / "tokens"
+    (tokens / "b@example.org.json").write_text("{}")
+    for email in (EMAIL, "b@example.org"):
+        Account(app.state_dir, email).update_settings({"schedule": {"frequency": "hourly"}}, now=1_000_000)
+    original = webapp.Account.due_run
+    def broken(self, now=None, tz=None):
+        if self.email == EMAIL:
+            raise OSError("disk trouble")
+        return original(self, now, tz)
+    monkeypatch.setattr(webapp.Account, "due_run", broken)
+    assert app.scheduler_tick(now=1_000_000 + 7200) == ["b@example.org"]
+
+
+def test_extension_store_link_only_when_the_operator_sets_it(app, monkeypatch):
+    assert call(app, "GET", "/api/state")[2]["extension"]["store_url"] == ""
+    monkeypatch.setenv("INBOX_TRIAGE_EXTENSION_STORE_URL", "https://chromewebstore.google.com/detail/abc")
+    assert call(app, "GET", "/api/state")[2]["extension"]["store_url"].startswith("https://chromewebstore")
+    monkeypatch.setenv("INBOX_TRIAGE_EXTENSION_STORE_URL", "javascript:alert(1)")
+    assert call(app, "GET", "/api/state")[2]["extension"]["store_url"] == ""

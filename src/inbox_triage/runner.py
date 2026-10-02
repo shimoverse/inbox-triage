@@ -18,7 +18,8 @@ from .context import bootstrap_context, build_context, sync_incremental
 from .gmail.client import GmailClient, GmailError, RateLimited
 from .gmail.extract import extract_gmail_message
 from .policy import decide, junk_decision
-from .providers import ProviderError, make_provider
+from .providers import JevError, ProviderError, make_provider
+from .providers.jev import RETRYABLE as JEV_RETRYABLE
 from .store import TriageStore
 
 try:  # POSIX
@@ -43,6 +44,7 @@ MAX_CONSECUTIVE_FAILURES = 5  # this many in a row means the provider is down: s
 MAX_WINDOW_DAYS = 90
 JOURNAL_RETENTION = (MAX_WINDOW_DAYS + 5) * 86400
 CREDITS_RETRY = 3600  # seconds before trying again when the Jev key is out of credits
+UNAVAILABLE_RETRY = 900  # seconds before trying again when Jev itself is down or unreachable
 from .config import CONFIG_DIR, STATE_DIR  # noqa: E402
 # Kept as a module attribute so tests can substitute a fake client.
 GmailReadOnlyClient = GmailClient
@@ -172,6 +174,8 @@ def ensure_labels(client: GmailClient, *extra: str, recolor: bool = False) -> di
             try:
                 client.create_label(name, color=label_color(name))
             except GmailError as exc:
+                if exc.status == 409:
+                    continue  # created by a retried request or another process: the readback below finds it
                 if exc.status != 400:
                     raise
                 client.create_label(name)  # colour is cosmetic: one Gmail won't take never blocks labeling
@@ -191,6 +195,11 @@ def ensure_labels(client: GmailClient, *extra: str, recolor: bool = False) -> di
 
 
 def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[str, str]) -> bool:
+    """Make the message carry exactly ``desired`` of Inbox Triage's labels. An uncertain or excluded
+    decision (nothing desired) never writes: mail Jev isn't sure about stays exactly as it was, including
+    any Inbox Triage label the person added by hand."""
+    if not desired:
+        return False
     old = client.message_labels(mid)
     owned = set(labels.values())
     target = {labels[name] for name in desired}
@@ -201,7 +210,9 @@ def apply_labels(client: GmailClient, mid: str, desired: set[str], labels: dict[
     # Gmail answers a change with the labels as they now are; read them again only if it didn't say.
     after = response.get("labelIds") if isinstance(response, dict) else None
     actual = set(after) if after is not None else client.message_labels(mid)
-    if actual & owned != target or (old - owned) - actual:
+    # Only Inbox Triage's own labels are checked: Gmail's native ones (UNREAD, INBOX, …) can change
+    # between the read and the write when the person opens or archives the mail, and that's not an error.
+    if actual & owned != target:
         raise RuntimeError("Gmail label readback mismatch")
     return True
 
@@ -346,11 +357,18 @@ def _run_locked(account: str, token: Path | None, directory: Path, max_messages:
                             signals, usage = provider.classify_with_usage(evidence, context)
                             jev_seconds += time.perf_counter() - started
                         except ProviderError as exc:
-                            if getattr(exc, "status", None) == 402:
+                            status = getattr(exc, "status", None)
+                            if status == 402:
                                 # Out of credits (or at the key's spending limit): not this email's fault.
                                 seen -= 1
                                 raise JevPaused("jev_credits", now + CREDITS_RETRY,
                                                 "The Jev key is out of credits") from None
+                            if isinstance(exc, JevError) and (status is None or status in JEV_RETRYABLE):
+                                # Jev is down, overloaded or unreachable: not this email's fault either, so it
+                                # doesn't use up one of the message's attempts. Pause and come back later.
+                                seen -= 1
+                                raise JevPaused("jev_unavailable", now + UNAVAILABLE_RETRY,
+                                                "Jev isn't answering right now") from None
                             # One malformed answer must not wedge the account: retry on later
                             # runs, then give up and leave the message unchanged.
                             failures += 1

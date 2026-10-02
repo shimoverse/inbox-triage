@@ -175,7 +175,7 @@ class HistoryExpired(RuntimeError):
 def write_private(path: Path, text: str) -> None:
     """Atomically write a 0600 file so a crash never leaves a truncated token."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")  # per process: two writers never share a temp file
     fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as file:
         file.write(text)
@@ -300,6 +300,9 @@ class ServiceAccountCredentials:
                     "assertion": assertion.decode() if isinstance(assertion, bytes) else assertion})
                 self.token, self.expiry = data["access_token"], time.time() + int(data.get("expires_in", 3600))
             return self.token
+
+
+HISTORY_SKIP = frozenset({"DRAFT", "SPAM", "TRASH", "CHAT"})
 
 
 class GmailClient:
@@ -448,7 +451,12 @@ class GmailClient:
             ids, seen = [], set()
             for record in records:
                 for added in record.get("messagesAdded", []) or []:
-                    mid = str((added.get("message") or {}).get("id", ""))
+                    message = added.get("message") or {}
+                    mid = str(message.get("id", ""))
+                    # The history record already says what the message is; a draft autosave, spam or
+                    # trash teaches nothing, so don't spend a read on it.
+                    if HISTORY_SKIP.intersection(message.get("labelIds") or ()):
+                        continue
                     if mid and mid not in seen:
                         seen.add(mid)
                         ids.append(mid)

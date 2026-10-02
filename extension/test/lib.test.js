@@ -8,8 +8,17 @@ test("reads the account and unread count from Gmail's tab title", () => {
   assert.equal(L.accountFromTitle("Inbox (12) - Dana.Lee@Example.org - Gmail"), "dana.lee@example.org");
   assert.equal(L.unreadFromTitle("Inbox (12) - dana@example.org - Gmail"), 12);
   assert.equal(L.unreadFromTitle("Inbox (1,204) - dana@example.org - Gmail"), 1204);
-  assert.equal(L.unreadFromTitle("Inbox - dana@example.org - Gmail"), 0);
+  assert.equal(L.unreadFromTitle("Posteingang (3) - dana@example.org - Gmail"), 3);
+  assert.equal(L.unreadFromTitle("Inbox - dana@example.org - Gmail"), null);  // no count shown
   assert.equal(L.accountFromTitle("Gmail"), "");
+  assert.equal(L.accountFromTitle("Inbox - dana@example.org - Acme Corp Mail"), "dana@example.org");  // Workspace
+});
+
+test("an address in an open thread's subject is not the account, and its numbers are not unread counts", () => {
+  const title = "Fwd: invoice (2024) from billing@vendor.example - dana@example.org - Gmail";
+  assert.equal(L.accountFromTitle(title), "dana@example.org");
+  assert.equal(L.unreadFromTitle(title), null);
+  assert.equal(L.unreadFromTitle("Re: Meeting (2) - dana@example.org - Gmail"), null);
 });
 
 test("links a label the way Gmail does", () => {
@@ -41,6 +50,15 @@ test("says what is happening in plain words", () => {
   assert.equal(L.statusLine({ jev_connected: true, last_run: { status: "ok", started: now - 300, finished: now - 120 } }, now).text,
     "Sorted 2 min ago");
   assert.equal(L.statusLine({ jev_connected: false }, now).kind, "warn");
+  // Paused with nothing to resume automatically, a Jev outage, and a run with no timestamps all read sensibly.
+  assert.match(L.statusLine({ jev_connected: true, last_run: { status: "paused", reason: "jev_credits" } }, now).text,
+    /^Jev is out of credits\. Open Inbox Triage/);
+  assert.match(L.statusLine({ jev_connected: true, resume_at: now + 900, last_run: { status: "paused", reason: "jev_unavailable" } }, now).text,
+    /^Jev isn't answering right now\. Carries on in 15 min$/);
+  assert.equal(L.statusLine({ jev_connected: true, last_run: { status: "ok" } }, now).text, "Sorted recently");
+  assert.equal(L.until(now + 3 * 86400, now), "in 3 days");
+  assert.equal(L.until(now + 7200, now), "in 2 h");
+  assert.equal(L.ago(now - 86400, now), "1 day ago");
 });
 
 test("the chart compares Needs You with every other label, never double-counting Shopping", () => {

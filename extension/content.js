@@ -4,8 +4,10 @@
 // shadow root, so Gmail's CSS and Trusted Types rules can't reach it, and it never changes Gmail's page.
 (() => {
   "use strict";
-  if (window.top !== window || window.__inboxTriageBar) return;
-  window.__inboxTriageBar = true;
+  // Only the main Gmail window: not a frame, and not a popout compose or print view (?view=cm, ?view=pt).
+  if (window.top !== window || /[?&]view=/.test(location.search)) return;
+  // A bar left by an earlier version of this script (the extension was updated or reloaded) is replaced.
+  for (const old of document.querySelectorAll("div[data-inbox-triage]")) old.remove();
 
   const L = self.InboxTriageLib;
   const REFRESH_MS = 60 * 1000;  // while the tab is visible
@@ -109,6 +111,7 @@
 
   // ---------------------------------------------------------------- the host, in its own shadow root
   const host = document.createElement("div");
+  host.dataset.inboxTriage = "1";
   host.style.setProperty("all", "initial", "important");
   host.style.setProperty("display", "block", "important");
   const shadow = host.attachShadow({ mode: "closed" });
@@ -122,9 +125,12 @@
   const root = h("section", { class: "bar", "aria-label": "Inbox Triage" });
   shadow.append(root);
 
-  const state = { email: "", unread: 0, connected: null, server: "", summary: null, error: "", notice: "",
+  const state = { email: "", unread: null, connected: null, server: "", summary: null, error: "", notice: "",
     expanded: false, busy: false, alive: true };
   let refreshTimer = 0;
+  let placeTimer = 0;
+  let titleWatch = null;
+  let drawn = "";  // what the bar currently shows, so a refresh that changes nothing leaves the DOM (and focus) alone
 
   // Above Gmail's main column; if Gmail's layout ever changes, a small floating bar instead.
   function place() {
@@ -156,6 +162,10 @@
       res = await chrome.runtime.sendMessage(msg);
     } catch (err) {
       if (!(chrome.runtime && chrome.runtime.id)) stop();  // the extension was updated or removed
+      // Chrome ends the worker when one request runs past five minutes (a long Google sign-in, say).
+      if (/message port closed|receiving end does not exist/i.test(String(err && err.message))) {
+        throw new Error(msg.type === "connect" ? "Sign-in took too long. Please try again" : "Inbox Triage didn't answer; it will try again shortly");
+      }
       throw err;
     }
     if (res && res.error) throw Object.assign(new Error(res.error), { status: res.status });
@@ -164,6 +174,8 @@
   function stop() {
     state.alive = false;
     clearTimeout(refreshTimer);
+    clearInterval(placeTimer);
+    if (titleWatch) titleWatch.disconnect();
     host.remove();
   }
 
@@ -187,12 +199,15 @@
   async function refresh() {
     clearTimeout(refreshTimer);
     if (!state.alive || !state.email) return;
+    const email = state.email;
     try {
-      const res = await ask({ type: "summary", email: state.email, tz: TZ });
+      const res = await ask({ type: "summary", email, tz: TZ });
+      if (email !== state.email) return;  // the tab moved to another account meanwhile: not this one's answer
       state.connected = res.connected;
       state.summary = res.connected ? res.data : null;
       state.error = "";
     } catch (err) {
+      if (email !== state.email) return;
       state.error = err.message;
     }
     render();
@@ -221,14 +236,10 @@
     state.error = "";
     render();
     try {
-      const res = await ask({ type: "connect", email: state.email });
-      if (res.email && res.email !== state.email) {
-        state.error = `Connected ${res.email}, but this Gmail tab is ${state.email}. Connect again and choose ${state.email}.`;
-      } else {
-        state.connected = true;
-        await refresh();
-        nudge(true);
-      }
+      await ask({ type: "connect", email: state.email });  // a token for another account is refused by the worker
+      state.connected = true;
+      await refresh();
+      nudge(true);
     } catch (err) {
       state.error = err.message;
     }
@@ -271,8 +282,12 @@
 
   function statusView(summary) {
     const line = L.statusLine(summary, Date.now() / 1000);
-    return h("span", { class: "status", role: "status" }, h("span", { class: "dot " + line.kind, "aria-hidden": "true" }),
-      h("span", {}, state.error ? state.error : line.text));
+    // Without a Jev key nothing gets sorted; the status itself opens the app, where the key is added.
+    const text = state.error ? state.error : line.text;
+    const body = !state.error && !summary.jev_connected
+      ? h("button", { class: "btn", type: "button", onclick: () => ask({ type: "openApp", email: state.email }) }, text)
+      : h("span", {}, text);
+    return h("span", { class: "status", role: "status" }, h("span", { class: "dot " + line.kind, "aria-hidden": "true" }), body);
   }
 
   function toggleButton() {
@@ -392,12 +407,17 @@
     if (!state.alive) return;
     place();
     root.classList.toggle("dark", isDark());
+    const floating = root.classList.contains("floating");
+    // A refresh that found nothing new must not rebuild the bar: that would drop keyboard focus and the chart tip.
+    const key = JSON.stringify([state.email, state.connected, state.error, state.notice, state.busy, state.expanded,
+      floating, state.summary, Math.floor(Date.now() / 60000)]);
+    if (key === drawn) return;
+    drawn = key;
     if (!state.email) return fill(root);
     if (state.connected === false || (state.connected === null && state.error)) return fill(root, connectView());
     if (!state.summary) {
       return fill(root, h("div", { class: "head" }, brand(), h("span", { class: "muted" }, state.error || "Loading…")));
     }
-    const floating = root.classList.contains("floating");
     fill(root, h("div", { class: "head" }, brand(), chips(state.summary), statusView(state.summary), floating ? null : toggleButton()),
       state.expanded && !floating ? panel(state.summary) : null);
   }
@@ -406,26 +426,32 @@
   // The tab title names the account and its unread count: "Inbox (12) - you@gmail.com - Gmail".
   function readTitle() {
     const email = L.accountFromTitle(document.title);
-    const unread = L.unreadFromTitle(document.title);
+    const unread = L.unreadFromTitle(document.title);  // null while a thread is open: the count isn't shown then
     if (email && email !== state.email) {
       Object.assign(state, { email, unread, connected: null, summary: null, error: "", notice: "" });
       start();
-    } else if (email && unread > state.unread) {
+    } else if (email && unread !== null && state.unread !== null && unread > state.unread) {
       state.unread = unread;
       nudge();  // new mail arrived: sort it now instead of waiting for the schedule
-    } else {
-      state.unread = unread;
+    } else if (unread !== null) {
+      state.unread = unread;  // fewer unread, or the first count seen: nothing to sort
     }
   }
 
-  new MutationObserver(readTitle).observe(document.head || document.documentElement,
-    { childList: true, subtree: true, characterData: true });
+  // Gmail rewrites the <title> text; watch that node rather than everything under <head>.
+  function watchTitle() {
+    const node = document.querySelector("title");
+    titleWatch = new MutationObserver(readTitle);
+    if (node) titleWatch.observe(node, { childList: true, characterData: true, subtree: true });
+    else titleWatch.observe(document.head || document.documentElement, { childList: true, subtree: true, characterData: true });
+  }
+  watchTitle();
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && state.connected) {
       refresh();
       nudge();
     }
   });
-  setInterval(() => { if (state.alive) place(); }, 1500);
+  placeTimer = setInterval(() => { if (state.alive) place(); }, 1500);
   readTitle();
 })();

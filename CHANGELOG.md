@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Only Gmail's own authentication verdict counts.** A sender could add its own `Authentication-Results: … dmarc=pass` header below Gmail's and unlock domain rules, purchase history and the authenticated gate for a spoofed domain. Now only the header with Gmail's authserv-id (`mx.google.com`) is read, and the first occurrence of every header wins.
+- **A Jev outage pauses the run** (*Jev isn't answering right now*, retried in 15 minutes) instead of counting against each message's three attempts; three outages no longer leave mail unlabeled for good.
+- **Uncertain mail is really left alone.** An uncertain or excluded decision no longer removes an Inbox Triage label the person added by hand, and a native label changing mid-write (UNREAD, say) is no longer a readback error.
+- **Addresses are redacted** inside subjects, excerpts and the notes summary before anything is sent to Jev.
+- **Server:** concurrent reads of one account wait for each other instead of answering 409; the job thread holds the account lock for the whole run; a lying `Content-Length` can't bypass the body cap; pending sign-ins are capped; polling the job and disconnecting the extension work during a run; one broken account no longer stops the scheduler for the others.
+- **Extension (0.1.2):** the account comes from the last address in Gmail's tab title (a thread subject containing an address switched the bar to it); the unread nudge fires only when the count really rises; a token for the wrong account is refused and revoked; expired tokens are dropped and tokens for other servers can be revoked from the options page; the bar keeps keyboard focus across refreshes; it runs on `mail.google.com/mail/` only and skips popout windows; Chrome ending a slow sign-in gives a plain message.
+- **Website:** the "Add to Chrome" button appears once `INBOX_TRIAGE_EXTENSION_STORE_URL` is set; the "access is full" message stays on screen with its link; the privacy page has no `mailto:` when no support address is configured; the install script's default limit (90) matches the public copy; stale "beta" wording removed.
+
 ## 0.6.0
 
 - **Jev through OpenRouter.** OpenRouter now sells Jev (`jev-latest`: $0.042 per million input tokens, output free) and accepts TypeSafe's request unchanged.

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .gmail.client import HistoryExpired
+from .gmail.extract import gmail_auth_results
 from .models import ContextPack, MailEvidence
 from .store import TriageStore
 
@@ -46,7 +47,10 @@ class ContextSyncStats:
 
 def _headers(message: dict) -> dict[str, str]:
     payload = message.get("payload") or {}
-    return {str(h.get("name", "")).lower(): str(h.get("value", "")) for h in payload.get("headers", [])}
+    out: dict[str, str] = {}
+    for h in payload.get("headers", []):  # first occurrence wins: Gmail's own headers come first
+        out.setdefault(str(h.get("name", "")).lower(), str(h.get("value", "")))
+    return out
 
 
 def _timestamp(message: dict, now: int) -> int:
@@ -81,7 +85,7 @@ def learn_message(store: TriageStore, account: str, message: dict, now: int) -> 
     domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
     # A purchase needs transaction language from a DMARC-aligned, non-freemail sender;
     # otherwise any phisher could mint "recent purchase" protection for their domain.
-    dmarc_pass = bool(re.search(r"\bdmarc=pass\b", headers.get("authentication-results", ""), re.I))
+    dmarc_pass = bool(re.search(r"\bdmarc=pass\b", gmail_auth_results(message.get("payload") or {}), re.I))
     if domain and domain not in FREEMAIL and dmarc_pass and _PURCHASE.search(subject):
         store.put_fact(account, "purchase_domain", domain, when, when + PURCHASE_TTL, "shopping")
         if thread:
@@ -167,7 +171,7 @@ def relevant_priorities(evidence: MailEvidence, path: str | Path, now: int) -> t
     try:
         data = json.loads(file.read_text())
     except (OSError, json.JSONDecodeError):
-        raise ValueError(f"Could not parse priorities file {file}") from None
+        return ()  # a hand-edited file with a typo must not stop every run for the account
     if not isinstance(data, dict): return ()
     haystack = " ".join((evidence.subject, evidence.excerpt, evidence.sender_domain)).casefold()
     matches = []
