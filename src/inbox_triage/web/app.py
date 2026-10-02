@@ -160,6 +160,11 @@ class App:
         if method == "OPTIONS" and path in EXT_CORS_PATHS:
             return 204, [], b""  # CORS preflight from the extension; cors_headers() adds the rest
         if path == "/" or path == "/index.html":
+            # localhost and 127.0.0.1 are different cookie hosts, and Google always returns to the base
+            # URL's host: a visit through the other name would start a sign-in whose cookie never comes
+            # back. Send it to the one address the app uses, so there's one session and one sign-in.
+            if host and host != urlparse(self.base_url).netloc:
+                return self.redirect(self.base_url + "/")
             return self.static("index.html")
         if path == "/connect":
             return self.static("connect.html")

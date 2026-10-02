@@ -705,6 +705,14 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     assert 'href="/privacy"' in index and "never sends, deletes" in index
 
 
+def test_home_page_uses_one_host_so_sign_in_cookies_come_back(app):
+    """localhost and 127.0.0.1 are different cookie hosts; Google returns to the base URL's host."""
+    status, headers, _ = call(app, "GET", "/", headers={"HTTP_HOST": "localhost:8765"})
+    assert status == 302 and headers["Location"] == "http://127.0.0.1:8765/"
+    assert call(app, "GET", "/", headers={"HTTP_HOST": "127.0.0.1:8765"})[0] == 200
+    assert call(app, "GET", "/api/state", headers={"HTTP_HOST": "localhost:8765"})[0] == 200  # the API itself still answers
+
+
 def test_oauth_state_is_bound_to_the_browser_that_started_the_sign_in(app, monkeypatch):
     """Login CSRF: an attacker starts a sign-in, finishes Google's consent as themselves, and sends the
     victim the callback URL. The victim's browser never set the sign-in cookie, so nothing happens."""
