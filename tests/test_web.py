@@ -18,9 +18,18 @@ from inbox_triage.runner import account_lock, account_lock_path
 EMAIL = "a@example.org"
 
 
-def call(app, method, path, body=None, cookie="", headers=None):
+OAUTH_JAR = {}  # state -> the cookie /api/login set in the browser that started that sign-in
+
+
+def call(app, method, path, body=None, cookie="", headers=None, fresh_browser=False):
+    """One WSGI request. A callback carries the OAuth cookie of the login that started it, as the same
+    browser would; ``fresh_browser=True`` is another browser, which has no such cookie."""
     raw = json.dumps(body).encode() if body is not None else b""
     path, _, query = path.partition("?")
+    if path == "/oauth/callback" and not fresh_browser:
+        state = (query.split("state=")[1].split("&")[0]) if "state=" in query else ""
+        if OAUTH_JAR.get(state):
+            cookie = "; ".join(x for x in (cookie, OAUTH_JAR[state]) if x)
     environ = {"REQUEST_METHOD": method, "PATH_INFO": path, "QUERY_STRING": query, "HTTP_HOST": "127.0.0.1:8765",
                "CONTENT_LENGTH": str(len(raw)), "wsgi.input": io.BytesIO(raw), "HTTP_COOKIE": cookie,
                "HTTP_X_REQUESTED_WITH": "inbox-triage", **(headers or {})}
@@ -29,7 +38,10 @@ def call(app, method, path, body=None, cookie="", headers=None):
         out["status"], out["headers"] = int(status.split()[0]), dict(hdrs)
     data = b"".join(app(environ, start))
     ctype = out["headers"].get("Content-Type", "")
-    return out["status"], out["headers"], (json.loads(data) if ctype == "application/json" and data else data)
+    parsed = json.loads(data) if ctype == "application/json" and data else data
+    if path == "/api/login" and out["status"] == 200 and "state=" in parsed.get("url", ""):
+        OAUTH_JAR[parsed["url"].split("state=")[1].split("&")[0]] = out["headers"]["Set-Cookie"].split(";")[0]
+    return out["status"], out["headers"], parsed
 
 
 @pytest.fixture
@@ -691,6 +703,52 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     assert "mailto:" not in text and "Contact: the operator." in text and "{{" not in text  # no link to nobody
     index = call(app, "GET", "/")[2].decode()
     assert 'href="/privacy"' in index and "never sends, deletes" in index
+
+
+def test_home_page_uses_one_host_so_sign_in_cookies_come_back(app):
+    """localhost and 127.0.0.1 are different cookie hosts; Google returns to the base URL's host."""
+    status, headers, _ = call(app, "GET", "/", headers={"HTTP_HOST": "localhost:8765"})
+    assert status == 302 and headers["Location"] == "http://127.0.0.1:8765/"
+    assert call(app, "GET", "/", headers={"HTTP_HOST": "127.0.0.1:8765"})[0] == 200
+    assert call(app, "GET", "/api/state", headers={"HTTP_HOST": "localhost:8765"})[0] == 200  # the API itself still answers
+
+
+def test_oauth_state_is_bound_to_the_browser_that_started_the_sign_in(app, monkeypatch):
+    """Login CSRF: an attacker starts a sign-in, finishes Google's consent as themselves, and sends the
+    victim the callback URL. The victim's browser never set the sign-in cookie, so nothing happens."""
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_ID", "cid")
+    monkeypatch.setenv("INBOX_TRIAGE_OAUTH_CLIENT_SECRET", "s")
+    victim = signed_in(app)
+    status, headers, data = call(app, "POST", "/api/login", {"email": "attacker@example.org"})
+    assert status == 200 and headers["Set-Cookie"].startswith("inbox_triage_oauth=")
+    assert "Path=/oauth/callback" in headers["Set-Cookie"] and "HttpOnly" in headers["Set-Cookie"]
+    state = data["url"].split("state=")[1].split("&")[0]
+    exchanged = []
+    creds = SimpleNamespace(granted_scopes=[oauth.SCOPE], refresh_token="r", token="t", to_json=lambda: "{}")
+    monkeypatch.setattr(oauth, "exchange", lambda *a: exchanged.append(a) or creds)
+    monkeypatch.setattr(oauth, "profile_email", lambda c: "attacker@example.org")
+    # The victim's browser: its own session cookie, not the attacker's sign-in cookie.
+    status, headers, _ = call(app, "GET", f"/oauth/callback?state={state}&code=abc", cookie=victim, fresh_browser=True)
+    assert status == 302 and "another%20browser" in headers["Location"] and "Set-Cookie" not in headers
+    assert not exchanged and state in app.pending  # Google's code was not spent; the real browser can still finish
+    assert not (app.config_dir / "tokens" / "attacker@example.org.json").exists()
+    # Junk in the cookie is just "not this browser", never a crash.
+    for junk in ("inbox_triage_oauth=caf\u00e9", "inbox_triage_oauth=" + "x" * 5000, "inbox_triage_oauth="):
+        assert call(app, "GET", f"/oauth/callback?state={state}&code=abc", cookie=junk, fresh_browser=True)[0] == 302
+    # A stale cookie from a different sign-in doesn't count either.
+    other = call(app, "POST", "/api/login", {"email": "attacker@example.org"})[1]["Set-Cookie"].split(";")[0]
+    status, headers, _ = call(app, "GET", f"/oauth/callback?state={state}&code=abc", cookie=other, fresh_browser=True)
+    assert status == 302 and "another%20browser" in headers["Location"] and not exchanged
+    # The browser that started it finishes normally, and its sign-in cookie is cleared.
+    raw = []
+    environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/oauth/callback", "QUERY_STRING": f"state={state}&code=abc",
+               "HTTP_HOST": "127.0.0.1:8765", "wsgi.input": io.BytesIO(b""), "HTTP_COOKIE": OAUTH_JAR[state]}
+    app(environ, lambda status, hdrs: raw.extend([status, *hdrs]))
+    cookies = [v for k, v in raw[1:] if k == "Set-Cookie"]
+    assert raw[0].startswith("302") and dict(raw[1:])["Location"].startswith("/#account=attacker")
+    assert any(c.startswith("inbox_triage_oauth=;") and "Max-Age=0" in c for c in cookies)
+    assert any(c.startswith("inbox_triage_session=") for c in cookies)
+    assert exchanged and state not in app.pending
 
 
 def _start_login(app, monkeypatch, email):
