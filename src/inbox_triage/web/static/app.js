@@ -467,7 +467,7 @@ function renderLanding() {
           ? el("a", { class: "btn primary", href: STATE.extension.store_url, target: "_blank", rel: "noopener" }, "Add to Chrome", icon("external", 15))
           : el("p", { class: "extension-status", role: "status" }, "It isn't in the Chrome Web Store yet. Developers can load it from the repository."),
         el("a", { class: STATE.extension?.store_url ? "btn link" : "btn", href: "https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md", target: "_blank", rel: "noopener" },
-          STATE.extension?.store_url ? "Developer setup and source" : "View extension and developer setup instructions"))),
+          STATE.extension?.store_url ? "Developer setup and source" : "Extension setup guide", icon("external", 15)))),
     el("section", { class: "section", id: "how", "aria-labelledby": "how-h" },
       el("h2", { class: "h-big", id: "how-h" }, `${STATE.jev.sponsored ? "Two" : "Three"} steps, then it runs on its own`),
       el("ol", { class: "steps3" }, howSteps().map(([title, text], i) =>
@@ -574,13 +574,13 @@ function jevKeyForm(a, onDone, extra = null) {
 }
 
 function stepJev(a, st) {
-  const keyMode = st.mode === "key";
+  const keyMode = st.mode === "key" || (Boolean(st.changeKey) && a.jev_connected);  // Back from step 2 with a key already saved
   const done = () => (keyMode ? leaveWizard(a, "settings") : goStep(st, 2));
   const extra = keyMode ? el("button", { type: "button", class: "btn ghost", onclick: () => leaveWizard(a, "settings") }, "Cancel")
     : a.jev_connected ? el("button", { type: "button", class: "btn ghost", onclick: () => { st.changeKey = false; goStep(st, 2); } }, "Keep current key")
     : null;
   return el("div", { class: "wrap narrow" },
-    keyMode ? null : stepper(1),
+    st.mode === "key" ? null : stepper(1),
     el("div", { class: "page-head" },
       keyMode ? null : el("span", { class: "kicker" }, `Welcome, ${a.email}`),
       el("h1", { tabindex: "-1" }, keyMode ? "Change your Jev key" : "Connect Jev, the engine that sorts your mail"),
@@ -692,7 +692,8 @@ function stepContext(a, st) {
   };
   if (!st.emails) {
     api(acctPath(a.email, "emails") + "?days=14").then((d) => { st.emails = d.emails; drawList(); drawRules(); })
-      .catch((err) => fill(list, el("li", { class: "empty" }, el("span", { class: "err" }, err.message))));
+      .catch((err) => fill(list, el("li", { class: "empty" }, el("span", { class: "err" }, explainError(err.message)),
+        " You can still describe what matters in your own words.")));
   }
 
   const interpretBtn = el("button", { class: "btn", type: "button", onclick: (e) => interpret(e.currentTarget) }, icon("pen", 15), "Turn notes into rules");
@@ -904,7 +905,12 @@ function pollJob(a, delay = 2500) {
       }
       if (ended || b.job?.status === "running") return current === b.email && tab === "overview" ? render() : undefined;
       if (b.resume_at) pollJob(b, resumeCheck(b));  // still paused: look again once the break is over
-    } catch { pollJob(a, delay); }
+    } catch {
+      // Offline, or the server is restarting: back off instead of asking every 2.5 s, and say so.
+      const line = document.getElementById("run-started");
+      if (line) line.textContent = "Can't reach Inbox Triage right now. Trying again shortly…";
+      pollJob(a, Math.min(30000, delay * 2));
+    }
   }, delay);
 }
 
@@ -920,7 +926,9 @@ function overviewPane(a) {
   api(acctPath(a.email, "history")).then((h) => { historyCache[a.email] = h; if (recent.isConnected) draw(h); })
     .catch((err) => {
       if (historyCache[a.email]) return;
-      fill(recent, el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")), el("p", { class: "empty err" }, err.message));
+      fill(recent, el("div", { class: "card-head" }, el("h2", { id: "recent-h" }, "Recently labeled")),
+        el("p", { class: "empty err" }, explainError(err.message)),
+        el("div", { class: "card-foot" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => render() }, "Try again")));
       history.hidden = true;
     });
   return el("div", { class: "wrap" }, statusCard(a), lastRunCard(a), recent, history);
@@ -959,7 +967,7 @@ function statusCard(a) {
       await api(acctPath(a.email, "run"), "POST", { days: days.value ? +days.value : null, dry_run: dry.checked });
       toast(dry.checked || a.settings.dry_run ? "Preview started." : "Sorting started.");
       await refresh();
-    } catch (err) { toast(err.message); runBtn.disabled = false; } } },
+    } catch (err) { toast(err.message); runBtn.disabled = false; if (err.status === 409) refresh(); } } },
     running ? null : icon("play", 15), running ? "Running…" : "Run now");
   const failed = job?.status === "error" && (!a.last_run || a.last_run.started < job.started);
   return el("section", { class: "card status", "aria-labelledby": "status-h" },
@@ -1254,4 +1262,9 @@ function settingsPane(a) {
 window.addEventListener("hashchange", () => {
   if (/(^|[#&])(account|error)=/.test(location.hash)) refresh();
 });
-refresh().catch((err) => mount(el("div", { class: "wrap tiny" }, el("p", { class: "notice err" }, err.message))));
+function boot() {
+  refresh().catch((err) => mount(el("div", { class: "wrap tiny stack" },
+    el("p", { class: "notice err", role: "alert" }, explainError(err.message)),
+    el("button", { type: "button", class: "btn", onclick: boot }, icon("sync", 15), "Try again"))));
+}
+boot();

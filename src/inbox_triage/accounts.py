@@ -55,8 +55,11 @@ class Account:
             sched = {**current["schedule"], **{k: v for k, v in wanted.items() if k in DEFAULT_SETTINGS["schedule"]}}
             if sched.get("frequency") not in FREQUENCIES:
                 raise ValueError("Unknown schedule frequency")
-            sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
-            sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            try:
+                sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
+                sched["weekday"] = min(6, max(0, int(sched.get("weekday", 0))))
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("The schedule's hour and weekday must be numbers") from None
             # The IANA zone the person picked the hour in (from their browser); unknown zones fall back to server time.
             name = str(sched.get("tz") or "")[:64]
             sched["tz"] = name if schedule_zone({"tz": name}) else ""

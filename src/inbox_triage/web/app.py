@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .. import __version__, config, onboarding
 from ..accounts import DEFAULT_SETTINGS, FREQUENCIES, Account, run_account
-from ..gmail.client import SCOPE, GmailClient, RateLimited, write_private
+from ..gmail.client import SCOPE, GmailClient, GmailError, RateLimited, write_private
 from ..preferences import Preferences
 from ..assistant import DEFAULT_MODEL as ASSIST_DEFAULT_MODEL, Assistant
 from ..providers import KEY_ENV, ProviderError, make_provider
@@ -433,6 +433,24 @@ class App:
         if (method, action) == ("GET", "job"):
             job = self.jobs.get(email)  # in memory only: answer even while the run holds the lock
             return job.__dict__ if job else {}
+        if (method, action) != ("POST", "run"):
+            # Reading history or rules, or saving rules, a key or settings, doesn't need the run lock: a run
+            # reads those once when it starts, and the writes are atomic. Only the short read gate (held for
+            # long by nothing but deleting the account) guards them, so the dashboard works while a run goes.
+            with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock"), blocking=True):
+                if not self.connected(email):
+                    raise HTTPError(409, "Reconnect this account with Google")
+                result = self._account_api_locked(method, email, action, body, query)
+            if (method, action) == ("GET", "emails"):  # Gmail is slow sometimes: never under the gate
+                return {"emails": self.recent_emails(email, _int(query.get("days", 7)))}
+            if (method, action) == ("GET", "history"):
+                decisions, details = self.decorate(email, result.pop("decisions"))
+                return {**result, "decisions": decisions, "details": details}
+            return result
+        with self.lock:
+            current = self.jobs.get(email)
+        if current and current.status == "running":
+            raise HTTPError(409, "A run is already in progress")  # say so, rather than "busy", from a stale tab
         try:
             with account_lock(account_lock_path(self.state_dir, email)):
                 return self._account_api_locked(method, email, action, body, query)
@@ -446,7 +464,7 @@ class App:
             raise HTTPError(409, "Reconnect this account with Google")
         acct = Account(self.state_dir, email)
         if (method, action) == ("GET", "emails"):
-            return {"emails": self.recent_emails(email, _int(query.get("days", 7)))}
+            return {}  # fetched by the caller, outside the gate
         if (method, action) == ("GET", "preferences"):
             return acct.preferences().to_json()
         if (method, action) == ("PUT", "preferences"):
@@ -474,8 +492,7 @@ class App:
             return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since,
                                   _account_locked=True)
         if (method, action) == ("GET", "history"):
-            decisions, details = self.decorate(email, acct.decisions(30))
-            return {"runs": acct.runs(50), "decisions": decisions, "details": details}
+            return {"runs": acct.runs(50), "decisions": acct.decisions(30)}  # decorated by the caller, outside the gate
         raise HTTPError(404, "Not found")
 
     def disconnect_fence(self, email: str) -> Path:
@@ -490,7 +507,9 @@ class App:
         this account (token, Jev key, rules, settings, history, context, journal)."""
         try:
             with account_lock(account_lock_path(self.state_dir, email)):
-                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock"), blocking=True):
+                # Non-blocking on purpose: a read or write in flight answers "try again" rather than being
+                # waited for, and a disconnect issued from inside such a write can never wait on itself.
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
                     self._forget_account_locked(email)
         except RuntimeError as exc:
             if str(exc) != "Account triage is already running":
@@ -533,9 +552,14 @@ class App:
 
     def recent_emails(self, email: str, days: int) -> list[dict]:
         days = min(max(days, 1), MAX_WINDOW_DAYS)
-        client = self.client(email)
-        ids = client.list_ids(f"in:inbox newer_than:{days}d -in:sent", 40)
-        return [_summarize(m) for m in client.get_many(ids, full=False)]
+        try:
+            client = self.client(email)
+            ids = client.list_ids(f"in:inbox newer_than:{days}d -in:sent", 40)
+            return [_summarize(m) for m in client.get_many(ids, full=False)]
+        except RateLimited:
+            raise
+        except GmailError as exc:  # Google's status and reason, which the UI explains; never a bare "Internal error"
+            raise HTTPError(502, str(exc)) from None
 
     def decorate(self, email: str, decisions: list[dict]) -> tuple[list[dict], bool]:
         """Fetch subject/from live so no message content is ever stored on disk. Recent answers are
@@ -757,6 +781,10 @@ class App:
     def start_job(self, email: str, days, dry_run: bool, trigger: str, since: int | None = None,
                   _account_locked: bool = False) -> dict:
         if not _account_locked:
+            with self.lock:
+                current = self.jobs.get(email)
+            if current and current.status == "running":
+                raise HTTPError(409, "A run is already in progress")
             try:
                 with account_lock(account_lock_path(self.state_dir, email)):
                     return self.start_job(email, days, dry_run, trigger, since, _account_locked=True)

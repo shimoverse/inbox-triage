@@ -319,7 +319,8 @@ def test_bad_inputs_are_400_not_500(app):
     cookie = signed_in(app)
     assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {"days": "abc"}, cookie)[0] == 400
     assert call(app, "GET", f"/api/accounts/{EMAIL}/emails?days=abc", cookie=cookie)[0] == 400
-    assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": "x"}}, cookie)[0] == 400
+    status, _, data = call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"schedule": {"hour": "x"}}, cookie)
+    assert status == 400 and "invalid literal" not in data["error"] and "must be numbers" in data["error"]
 
 
 def test_each_account_can_bring_its_own_jev_key(app, monkeypatch):
@@ -672,8 +673,9 @@ def test_other_account_remains_writable_while_first_account_is_locked(app):
     with account_lock(account_lock_path(app.state_dir, EMAIL)):
         assert call(app, "PUT", "/api/accounts/b@example.org/settings", {"onboarded": True},
                     signed_in(app, ("b@example.org",)))[0] == 200
-        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True},
-                    signed_in(app))[0] == 409
+        # Saving settings never waits for a run; only starting another run does.
+        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"onboarded": True}, signed_in(app))[0] == 200
+        assert call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, signed_in(app))[0] == 409
     assert Account(app.state_dir, "b@example.org").settings()["onboarded"]
 
 
@@ -994,7 +996,22 @@ def test_job_status_is_readable_while_the_run_holds_the_lock(app):
     with account_lock(account_lock_path(app.state_dir, EMAIL)):
         status, _, job = call(app, "GET", f"/api/accounts/{EMAIL}/job", cookie=cookie)
         assert status == 200 and job["status"] == "running"
-        assert call(app, "GET", f"/api/accounts/{EMAIL}/history", cookie=cookie)[0] == 409  # still needs the lock
+        # Reading history and rules, and saving rules or settings, never wait for the run either.
+        assert call(app, "GET", f"/api/accounts/{EMAIL}/history", cookie=cookie)[0] == 200
+        assert call(app, "GET", f"/api/accounts/{EMAIL}/preferences", cookie=cookie)[0] == 200
+        assert call(app, "PUT", f"/api/accounts/{EMAIL}/settings", {"dry_run": True}, cookie)[0] == 200
+        status, _, data = call(app, "POST", f"/api/accounts/{EMAIL}/run", {}, cookie)
+        assert status == 409 and data["error"] == "A run is already in progress"  # not a vague "busy"
+
+
+def test_gmail_errors_while_listing_recent_mail_are_explained_not_internal(app, monkeypatch):
+    from inbox_triage.gmail.client import GmailError
+    class Broken:
+        def profile(self): return {"emailAddress": EMAIL}
+        def list_ids(self, *a, **kw): raise GmailError(403, "", "insufficientPermissions")
+    monkeypatch.setattr(webapp, "GmailClient", lambda token: Broken())
+    status, _, data = call(app, "GET", f"/api/accounts/{EMAIL}/emails", cookie=signed_in(app))
+    assert status == 502 and "HTTP 403 (insufficientPermissions)" in data["error"]
 
 
 def test_concurrent_reads_of_one_account_wait_instead_of_failing(app):
