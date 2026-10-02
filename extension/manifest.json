@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Inbox Triage",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "identity"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
-    { "matches": ["https://mail.google.com/*"], "js": ["lib.js", "content.js"], "run_at": "document_idle" }
+    { "matches": ["https://mail.google.com/mail/*"], "js": ["lib.js", "content.js"], "run_at": "document_idle" }
   ],
   "options_ui": { "page": "options.html", "open_in_tab": true },
   "action": { "default_title": "Inbox Triage settings" },

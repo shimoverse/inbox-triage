@@ -15,16 +15,21 @@
   ].map(([key, name, gmail, bg, fg]) => ({ key, name, gmail, bg, fg }));
   const ATTENTION = ["needs_you", "updates", "for_you", "later", "junk"];  // at most one of these per email
 
-  const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+  const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
-  // Gmail's tab title: "Inbox (12) - you@gmail.com - Gmail".
+  // Gmail's tab title: "Inbox (12) - you@gmail.com - Gmail", or "<subject> - you@gmail.com - Gmail" with a
+  // thread open. The account is the LAST address: a subject may well contain one ("Fwd: invoice from billing@…").
   function accountFromTitle(title) {
-    const match = String(title || "").match(EMAIL);
-    return match ? match[0].toLowerCase() : "";
+    const all = String(title || "").match(EMAIL);
+    return all ? all[all.length - 1].toLowerCase() : "";
   }
+  // The unread count, "(12)", follows a short folder name in the first part of the title. A number in a
+  // subject ("Re: report (2024)") is not one: subjects are long or carry a "Re:"/"Fwd:" colon. Null when the
+  // title shows no count, as it doesn't while a thread is open.
   function unreadFromTitle(title) {
-    const match = String(title || "").match(/\((\d[\d,.\s]*)\)/);
-    return match ? parseInt(match[1].replace(/\D/g, ""), 10) || 0 : 0;
+    const head = String(title || "").split(" - ")[0];
+    const match = head.match(/^([^(:]{1,40})\((\d[\d,.\s]*)\)\s*$/);
+    return match ? parseInt(match[2].replace(/\D/g, ""), 10) || 0 : null;
   }
 
   // Gmail's own address for a label, e.g. #label/Triage%2FNeeds+You.
@@ -61,8 +66,9 @@
     const s = Math.max(0, Math.round(ts - now));
     if (s < 60) return "in a moment";
     if (s < 3600) return `in ${Math.round(s / 60)} min`;
-    const h = Math.round(s / 3600);
-    return `in ${h} h`;
+    if (s < 86400) return `in ${Math.round(s / 3600)} h`;
+    const d = Math.round(s / 86400);
+    return `in ${d} day${d === 1 ? "" : "s"}`;
   }
 
   // "Dana Lee <dana@example.org>" -> "Dana Lee"; a bare address stays as it is.
@@ -78,15 +84,18 @@
     if (!s.jev_connected) return { kind: "warn", text: "Needs a Jev key before it can sort: open Inbox Triage to add one" };
     if (s.running) return { kind: "live", text: "Sorting new mail now…" };
     const last = s.last_run;
-    if (s.resume_at && last && last.status === "paused") {
+    if (last && last.status === "paused") {
       const why = last.reason === "sponsored_limit" ? "Today's free sorting allowance is used up"
-        : last.reason === "jev_credits" ? "Jev is out of credits" : "Gmail asked for a short break";
-      return { kind: "warn", text: `${why}. Carries on ${until(s.resume_at, now)}` };
+        : last.reason === "jev_credits" ? "Jev is out of credits"
+        : last.reason === "jev_unavailable" ? "Jev isn't answering right now" : "Gmail asked for a short break";
+      if (s.resume_at) return { kind: "warn", text: `${why}. Carries on ${until(s.resume_at, now)}` };
+      return { kind: "warn", text: `${why}. Open Inbox Triage and click Run now to carry on` };
     }
     if (last && last.status === "error") return { kind: "warn", text: "The last run didn't finish. Open Inbox Triage for details" };
     if (s.preview) return { kind: "idle", text: "Preview mode: labels aren't added to Gmail" };
     if (!last) return { kind: "live", text: "Getting ready to sort your recent mail" };
-    return { kind: "live", text: `Sorted ${ago(last.finished || last.started, now)}` };
+    const when = last.finished || last.started;
+    return { kind: "live", text: when ? `Sorted ${ago(when, now)}` : "Sorted recently" };
   }
 
   // Columns for the 7-day chart: Needs You (the one that matters) against every other label.
