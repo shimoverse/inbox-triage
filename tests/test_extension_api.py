@@ -210,3 +210,32 @@ def test_redirect_and_pkce_rules():
     assert not ext.redirect_allowed(REDIRECT + "?x=https://evil.example", hosted=False)
     assert not ext.redirect_allowed(f"https://{EXT_ID}.chromiumapp.org.evil.example/", hosted=False)
     assert ext.pkce_matches(VERIFIER, CHALLENGE) and not ext.pkce_matches("short", CHALLENGE)
+
+
+def test_the_extension_can_disconnect_while_a_run_holds_the_lock(app):  # noqa: F811
+    from inbox_triage.runner import account_lock, account_lock_path
+    token = connect(app)
+    with account_lock(account_lock_path(app.state_dir, EMAIL)):
+        assert call(app, "GET", "/api/ext/summary?tz=UTC", headers=bearer(token))[0] == 200
+        assert call(app, "DELETE", "/api/ext/token", headers=bearer(token))[0] == 200
+    assert call(app, "GET", "/api/ext/summary", headers=bearer(token))[0] == 401
+
+
+def test_summary_details_are_fetched_outside_the_read_gate(app, monkeypatch):  # noqa: F811
+    """Gmail is slow sometimes; the dashboard's sender/subject fetch must not hold the gate other readers need."""
+    from inbox_triage.runner import account_lock, account_lock_path, append_event
+    token = connect(app)
+    append_event(Account(app.state_dir, EMAIL).dir / "events.jsonl",
+                 {"id": "m1", "status": "verified", "names": ["Triage/Later"], "ts": 1})
+    gate = account_lock_path(app.state_dir, EMAIL).with_suffix(".read.lock")
+    held = {}
+    def decorate(email, decisions):
+        try:
+            with account_lock(gate):
+                held["free"] = True
+        except RuntimeError:
+            held["free"] = False
+        return [{**d, "from": "x", "subject": "y"} for d in decisions], True
+    monkeypatch.setattr(app, "decorate", decorate)
+    status, _, summary = call(app, "GET", "/api/ext/summary?tz=UTC", headers=bearer(token))
+    assert status == 200 and summary["recent"][0]["subject"] == "y" and held == {"free": True}

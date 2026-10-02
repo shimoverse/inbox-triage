@@ -51,7 +51,8 @@ class Account:
             if key in changes:
                 current[key] = bool(changes[key])
         if "schedule" in changes:
-            sched = {**current["schedule"], **(changes["schedule"] or {})}
+            wanted = changes["schedule"] if isinstance(changes["schedule"], dict) else {}
+            sched = {**current["schedule"], **{k: v for k, v in wanted.items() if k in DEFAULT_SETTINGS["schedule"]}}
             if sched.get("frequency") not in FREQUENCIES:
                 raise ValueError("Unknown schedule frequency")
             sched["hour"] = min(23, max(0, int(sched.get("hour", 7))))
@@ -240,15 +241,16 @@ def latest_slot(sched: dict, now: int, tz: tzinfo | None = None) -> int | None:
 
 def run_account(account: str, state_root: Path, *, trigger: str = "manual", days: int | None = None,
                 since: int | None = None, runner_kwargs: dict | None = None, now: int | None = None,
-                jev_daily_limit: int | None = None) -> dict:
+                jev_daily_limit: int | None = None, _account_locked: bool = False) -> dict:
     """Run triage in batches until the window is done (bounded), and record history.
     A run Gmail throttles is recorded as paused (with when to resume), not as failed.
     A rescan of ``days`` records where its window starts (``since``) so a resume covers the same mail.
     ``jev_daily_limit`` is set when the operator's key pays: past that many Jev calls today (UTC),
     the run pauses until midnight UTC, the same way it pauses for Gmail."""
+    import contextlib
     from . import runner
-    with runner.account_lock(runner.account_lock_path(state_root, account)):
-        token = (runner_kwargs or {}).get("token")
+    lock = contextlib.nullcontext() if _account_locked else runner.account_lock(runner.account_lock_path(state_root, account))
+    with lock:
         if runner.account_lock_path(state_root, account).with_suffix(".deleted").exists():
             raise FileNotFoundError("Account disconnected; reconnect before running")
         return _run_account_locked(account, state_root, trigger=trigger, days=days, since=since,

@@ -41,6 +41,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EXT_CORS_PATHS = {"/api/ext/token", "/api/ext/summary", "/api/ext/sync"}
 # Only the extension's connect page, and only characters a URL query may hold (no spaces, CR/LF or #).
 NEXT_RE = re.compile(r"/connect\?[A-Za-z0-9_\-.~%&=+:/@!$'()*,;]*")
+MAX_PENDING_LOGINS = 1000  # Google sign-ins started but not finished (15-minute lifetime)
 BETA_FULL = ("Free hosted access is full. Inbox Triage is open source, so you can run it yourself: "
              "github.com/shimoverse/inbox-triage")
 
@@ -188,7 +189,12 @@ class App:
     @staticmethod
     def read_json(environ) -> dict:
         try:
-            length = min(int(environ.get("CONTENT_LENGTH") or 0), 1_000_000)
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            raise HTTPError(400, "Invalid request") from None
+        if not 0 <= length <= 1_000_000:
+            raise HTTPError(400, "Request too large")
+        try:
             data = json.loads(environ["wsgi.input"].read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             raise HTTPError(400, "Invalid JSON") from None
@@ -263,7 +269,7 @@ class App:
                                  "next_run": None, "resume_at": None, "job": None, "rules": 0})
                 continue
             try:
-                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock"), blocking=True):
                     if not self.connected(email):
                         accounts.append({"email": email, "connected": False, "settings": DEFAULT_SETTINGS,
                                          "jev_connected": False, "own_jev_key": False, "last_run": None,
@@ -278,7 +284,8 @@ class App:
                         "sponsored": self.sponsored},
                 "assistant": {"available": bool(config.api_key_for("assistant", self.config_dir)),
                               "model": os.environ.get("INBOX_TRIAGE_ASSIST_MODEL") or ASSIST_DEFAULT_MODEL},
-                "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS}
+                "beta": self.beta(), "frequencies": list(FREQUENCIES), "max_days": MAX_WINDOW_DAYS,
+                "extension": {"store_url": extension_store_url()}}
 
     def _account_state(self, email: str) -> dict:
         acct = Account(self.state_dir, email)
@@ -316,6 +323,9 @@ class App:
         with self.lock:
             now = time.time()
             self.pending = {k: v for k, v in self.pending.items() if now - v["created"] < 900}
+            if len(self.pending) >= MAX_PENDING_LOGINS:  # unauthenticated: never let it grow without bound
+                for stale in sorted(self.pending, key=lambda k: self.pending[k]["created"])[:len(self.pending) // 2]:
+                    del self.pending[stale]
             # Capture every disconnect generation: a hintless Google login only reveals
             # its account after exchanging the code, so a per-hint snapshot is insufficient.
             fences = self.config_dir / "disconnect-fences"
@@ -417,6 +427,9 @@ class App:
         if (method, action) == ("DELETE", ""):
             self.forget_account(email)
             return {"ok": True}
+        if (method, action) == ("GET", "job"):
+            job = self.jobs.get(email)  # in memory only: answer even while the run holds the lock
+            return job.__dict__ if job else {}
         try:
             with account_lock(account_lock_path(self.state_dir, email)):
                 return self._account_api_locked(method, email, action, body, query)
@@ -448,8 +461,8 @@ class App:
             changes = {k: body[k] for k in ("model", "dry_run", "onboarded", "schedule") if k in body}
             try:
                 return acct.update_settings(changes)
-            except (TypeError, ValueError) as exc:
-                raise HTTPError(400, str(exc)) from None
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise HTTPError(400, str(exc) or "Invalid settings") from None
         if (method, action) == ("POST", "run"):
             last = acct.runs(1)
             paused = last[0] if last and last[0].get("status") == "paused" else {}
@@ -457,9 +470,6 @@ class App:
             since = paused.get("since") if paused.get("days") and str(paused["days"]) == str(body.get("days")) else None
             return self.start_job(email, body.get("days"), bool(body.get("dry_run")), "manual", since=since,
                                   _account_locked=True)
-        if (method, action) == ("GET", "job"):
-            job = self.jobs.get(email)
-            return job.__dict__ if job else {}
         if (method, action) == ("GET", "history"):
             decisions, details = self.decorate(email, acct.decisions(30))
             return {"runs": acct.runs(50), "decisions": decisions, "details": details}
@@ -477,7 +487,7 @@ class App:
         this account (token, Jev key, rules, settings, history, context, journal)."""
         try:
             with account_lock(account_lock_path(self.state_dir, email)):
-                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
+                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock"), blocking=True):
                     self._forget_account_locked(email)
         except RuntimeError as exc:
             if str(exc) != "Account triage is already running":
@@ -577,12 +587,20 @@ class App:
             return self.ext_token(body)
         data = self.ext_identity(environ)
         email = data["email"]
-        if (method, action) in {("GET", "summary"), ("POST", "sync")}:
+        gate = account_lock_path(self.state_dir, email).with_suffix(".read.lock")
+        if (method, action) in {("GET", "summary"), ("POST", "sync"), ("DELETE", "token")}:
             try:
-                with account_lock(account_lock_path(self.state_dir, email).with_suffix(".read.lock")):
-                    email, _ = self.ext_account(environ)
+                with account_lock(gate, blocking=True):  # a short gate; only deleting the account holds it long
+                    email, token_id = self.ext_account(environ)
+                    if (method, action) == ("DELETE", "token"):
+                        ext.TokenRegistry(Account(self.state_dir, email).dir).remove(token_id)
+                        return {"ok": True}
                     if (method, action) == ("GET", "summary"):
-                        return self.ext_summary(email, query)
+                        summary, labeled = self.ext_summary(email, query)
+                # Sender/subject details come from Gmail live: never under the gate, so nothing else waits.
+                if (method, action) == ("GET", "summary"):
+                    return self.ext_decorated(email, summary, labeled)
+                with account_lock(gate, blocking=True):
                     # No run lock is needed to answer a running/paused request.
                     result = self.ext_sync(email, read_only=True)
                     if result is not None:
@@ -600,24 +618,16 @@ class App:
                 if str(exc) != "Account triage is already running":
                     raise
                 raise HTTPError(409, "Account is busy; try again") from exc
-        try:
-            with account_lock(account_lock_path(self.state_dir, email)):
-                email, token_id = self.ext_account(environ)
-                if (method, action) == ("DELETE", "token"):
-                    ext.TokenRegistry(Account(self.state_dir, email).dir).remove(token_id)
-                    return {"ok": True}
-                raise HTTPError(404, "Not found")
-        except RuntimeError as exc:
-            if str(exc) != "Account triage is already running":
-                raise
-            raise HTTPError(409, "Account is busy; try again") from exc
+        raise HTTPError(404, "Not found")
 
     def ext_authorize(self, body: dict, emails: list[str]) -> dict:
         """The connect page, after the person clicks Connect: a one-time code for the extension."""
         redirect_uri, state = str(body.get("redirect_uri", "")), str(body.get("state", ""))
         challenge, email = str(body.get("code_challenge", "")), str(body.get("email", "")).strip().casefold()
         if not ext.redirect_allowed(redirect_uri, self.hosted):
-            raise HTTPError(403, "This extension isn't allowed to connect to this server")
+            raise HTTPError(403, "This server doesn't accept this copy of the extension yet. If you run the server, "
+                                 "add the extension's ID to INBOX_TRIAGE_EXTENSION_IDS; otherwise install Inbox Triage "
+                                 "from the Chrome Web Store.")
         if not re.fullmatch(r"[A-Za-z0-9_\-]{43}", challenge) or not 8 <= len(state) <= 200:
             raise HTTPError(400, "The extension's sign-in request is incomplete; try again from Gmail")
         if email not in emails:
@@ -688,15 +698,15 @@ class App:
             raise HTTPError(401, "Connect the extension again")
         return data
 
-    def ext_summary(self, email: str, query: dict) -> dict:
-        """What the Gmail dashboard bar draws: counts per label per day, the run status, recent decisions."""
+    def ext_summary(self, email: str, query: dict) -> tuple[dict, list[dict]]:
+        """What the Gmail dashboard bar draws: counts per label per day and the run status, plus the
+        recent decisions still to be decorated (see ``ext_decorated``). Reads local files only."""
         from ..runner import load_events
         acct = Account(self.state_dir, email)
         events = list(load_events(acct.dir / "events.jsonl").values())  # IDs and label names only
         counts = ext.label_counts(events, int(time.time()), str(query.get("tz", ""))[:64])
         labeled = sorted((e for e in events if e.get("status") == "verified" and e.get("names")),
                          key=lambda e: int(e.get("ts", 0)), reverse=True)[:8]
-        recent, details = self.decorate(email, labeled)
         runs, job, paused = acct.runs(1), self.jobs.get(email), acct.pending_resume()
         settings = acct.settings()
         jev = bool(acct.jev_key() or self.machine_jev_key())
@@ -704,7 +714,12 @@ class App:
                 "running": bool(job and job.status == "running"), "last_run": runs[0] if runs else None,
                 "next_run": acct.next_run(), "resume_at": paused["resume_at"] if paused else None,
                 "preview": bool(settings.get("dry_run")), "schedule": settings["schedule"]["frequency"],
-                "labels": ext.LABEL_KEYS, **counts, "details": details,
+                "labels": ext.LABEL_KEYS, **counts}, labeled
+
+    def ext_decorated(self, email: str, summary: dict, labeled: list[dict]) -> dict:
+        """The summary plus the sender and subject of the recently labeled mail, fetched from Gmail live."""
+        recent, details = self.decorate(email, labeled)
+        return {**summary, "details": details,
                 "recent": [{"id": d["id"], "names": d.get("names", []), "from": d.get("from", ""),
                             "subject": d.get("subject", ""), "ts": d.get("ts", 0)} for d in recent]}
 
@@ -728,8 +743,9 @@ class App:
         try:
             self.start_job(email, None, False, "extension", _account_locked=_account_locked)
         except HTTPError as exc:
-            return {"started": False, "reason": "running" if exc.status == 409 and "busy" in exc.message else "unavailable",
-                    **({"message": exc.message} if "busy" not in exc.message else {})}
+            running = exc.status == 409 and exc.message in {"Account is busy; try again", "A run is already in progress"}
+            return {"started": False, "reason": "running" if running else "unavailable",
+                    **({} if running else {"message": exc.message})}
         with self.lock:
             self.ext_syncs[email] = now
         return {"started": True}
@@ -769,16 +785,18 @@ class App:
         try:
             # The thread may start after another process disconnects the account.
             # Fence before Account() (which creates its directory).
+            # The lock is held for the whole run: letting it go between the check and the run would let a
+            # request handler take it, and the run would fail as "already running" without being recorded.
             with account_lock(account_lock_path(self.state_dir, job.account), blocking=True):
                 if not self.connected(job.account):
                     raise FileNotFoundError("Account disconnected before run started")
                 acct = Account(self.state_dir, job.account)
                 settings = acct.settings()
                 access = self.jev_access(acct, settings)
-            job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since,
-                                     jev_daily_limit=access.daily_limit, runner_kwargs={
-                "token": default_token(job.account, self.config_dir), "model": access.model,
-                "api_key": access.key, "dry_run": dry_run or bool(settings.get("dry_run"))})
+                job.result = self.run_fn(job.account, self.state_dir, trigger=trigger, days=days, since=since,
+                                         jev_daily_limit=access.daily_limit, _account_locked=True, runner_kwargs={
+                    "token": default_token(job.account, self.config_dir), "model": access.model,
+                    "api_key": access.key, "dry_run": dry_run or bool(settings.get("dry_run"))})
             job.status = "paused" if job.result.get("status") == "paused" else "ok"
             result = job.result
             detail = (f" resume_in={max(0, int(result.get('resume_at', 0) - time.time()))}s reason={result.get('reason', '')}"
@@ -787,7 +805,9 @@ class App:
                  f"labeled={result.get('gmail_changes', 0)} jev_calls={result.get('jev_calls', 0)} "
                  f"jev_cost={result.get('jev_cost', 0)} slowdowns={result.get('gmail_slowdowns', 0)}{detail}")
         except Exception as exc:
-            job.status, job.result = "error", {"error": type(exc).__name__, "message": str(exc)[:300]}
+            shown = ("Reconnect this account with Google" if isinstance(exc, FileNotFoundError)  # never a server path
+                     else str(exc)[:300])
+            job.status, job.result = "error", {"error": type(exc).__name__, "message": shown}
             # Google's status and reason code say what went wrong without any mailbox content.
             _log(f"run error account={_tag(job.account)} trigger={trigger} type={type(exc).__name__} "
                  f"status={getattr(exc, 'status', '')} reason={getattr(exc, 'reason', '')}")
@@ -811,7 +831,17 @@ class App:
                 started.append(email)
             except (HTTPError, RuntimeError):
                 continue  # already running, or Jev isn't connected
+            except Exception:  # one account's broken state must not stop the others from being scheduled
+                traceback.print_exc()
+                continue
         return started
+
+
+def extension_store_url() -> str:
+    """INBOX_TRIAGE_EXTENSION_STORE_URL: the Chrome Web Store listing, once it is public. Until an operator
+    sets it, the landing page doesn't promise a download."""
+    url = os.environ.get("INBOX_TRIAGE_EXTENSION_STORE_URL", "").strip()
+    return url if url.startswith("https://") and len(url) < 500 else ""
 
 
 def check_operator_key(key: str) -> bool:
@@ -838,7 +868,7 @@ def _log(message: str) -> None:
 def _int(value) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise HTTPError(400, "Expected a number") from None
 
 
@@ -875,12 +905,13 @@ def serve(argv=None) -> int:
         parser.error("Binding beyond this computer requires --public-url (served over HTTPS)")
     if args.public_url and not args.public_url.startswith("https://"):
         parser.error("--public-url must be https://")
-    base = args.public_url or f"http://127.0.0.1:{args.port}"
+    local = "[::1]" if args.host == "::1" else args.host
+    base = args.public_url or f"http://{local}:{args.port}"
     config.load_dotenv(Path(".env"), args.config_dir / ".env")
     app = App(config_dir=args.config_dir, state_dir=args.state_dir, base_url=base, hosted=bool(args.public_url))
     if app.sponsored:
         limit = config.sponsored_daily_limit()
-        print(f"Sponsored beta: accounts without their own Jev key use this server's key, up to {limit} Jev calls "
+        print(f"Sponsored access: accounts without their own Jev key use this server's key, up to {limit} Jev calls "
               "per account per day. Cap the key's spending with its provider too.")
         threading.Thread(target=check_operator_key, args=(app.machine_jev_key(),), daemon=True).start()
     elif app.hosted and config.api_key_for("jev", args.config_dir):
