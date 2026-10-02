@@ -8,6 +8,8 @@ See https://docs.typesafe.ai/api.
 """
 from __future__ import annotations
 
+import re
+
 from ..models import ContextPack, JevSignals, MailEvidence
 
 BINARY = {
@@ -38,12 +40,25 @@ class ProviderError(RuntimeError):
     pass
 
 
+_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def redact(text: str) -> str:
+    """Email addresses inside a subject, excerpt or note ("Hi alice@example.org", a forwarded header)
+    are replaced before anything leaves the machine; Jev only ever needs the words around them."""
+    return _ADDRESS.sub("[email]", text)
+
+
 def evidence_state(e: MailEvidence, c: ContextPack, *, subject_chars: int = 200, excerpt_chars: int = 1000) -> dict:
     """The only message data any provider receives: no IDs, addresses, MIME, or attachments."""
-    return {"sender_domain": e.sender_domain, "subject": e.subject[:subject_chars], "excerpt": e.excerpt[:excerpt_chars],
+    context = c.outbound()
+    if context.get("user_preferences"):
+        context["user_preferences"] = redact(context["user_preferences"])
+    return {"sender_domain": e.sender_domain, "subject": redact(e.subject[:subject_chars]),
+            "excerpt": redact(e.excerpt[:excerpt_chars]),
             "gmail_important": "IMPORTANT" in e.labels, "authentication": dict(e.auth),
             "list_unsubscribe": e.list_unsubscribe, "bulk": e.bulk, "user_replied": e.user_replied,
-            "protected_kinds": sorted(e.protected_kinds), "context": c.outbound()}
+            "protected_kinds": sorted(e.protected_kinds), "context": context}
 
 
 def questions(topics: tuple[str, ...] = LIVE_TOPICS) -> dict:

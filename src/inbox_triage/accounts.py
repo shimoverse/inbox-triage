@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {"model": "", "dry_run": False, "onboarded": False,
                     "schedule": {"frequency": "off", "hour": 7, "weekday": 0, "anchor": 0, "tz": ""}}
 MAX_BATCHES = 20  # 20 x 100 messages per run keeps a 30-day backfill bounded
 MAX_RESUMES = 6  # automatic pick-ups of a run Gmail paused, before waiting for the schedule or a click
+MAX_RUNS_KEPT = 2000  # runs.jsonl is trimmed to this many entries once it grows past twice that
 
 
 def account_dir(root: Path, account: str) -> Path:
@@ -101,6 +102,11 @@ class Account:
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as file:
             file.write(json.dumps(entry, separators=(",", ":"), sort_keys=True) + "\n")
+        # An hourly schedule writes thousands of lines a year; keep the file (and every read of it) bounded.
+        if path.stat().st_size > 100_000:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 2 * MAX_RUNS_KEPT:
+                write_private(path, "\n".join(lines[-MAX_RUNS_KEPT:]) + "\n")
 
     def runs(self, limit: int | None = 50) -> list[dict]:
         """Newest first; ``limit=None`` returns them all."""
@@ -129,7 +135,7 @@ class Account:
     def pending_resume(self) -> dict | None:
         """The latest run, if Gmail paused it and it will be picked up again automatically.
         A preview isn't: it keeps no progress, so resuming would only repeat the same Jev calls."""
-        runs = self.runs(None)
+        runs = self.runs(MAX_RUNS_KEPT)
         if not runs or runs[0].get("status") != "paused" or not runs[0].get("resume_at") \
                 or runs[0].get("mode") == "dry-run":
             return None

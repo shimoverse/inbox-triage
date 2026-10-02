@@ -302,6 +302,9 @@ class ServiceAccountCredentials:
             return self.token
 
 
+HISTORY_SKIP = frozenset({"DRAFT", "SPAM", "TRASH", "CHAT"})
+
+
 class GmailClient:
     """Gmail access for triage. It never sends, deletes, archives, or marks read;
     the only writes are creating its labels and adding/removing them."""
@@ -448,7 +451,12 @@ class GmailClient:
             ids, seen = [], set()
             for record in records:
                 for added in record.get("messagesAdded", []) or []:
-                    mid = str((added.get("message") or {}).get("id", ""))
+                    message = added.get("message") or {}
+                    mid = str(message.get("id", ""))
+                    # The history record already says what the message is; a draft autosave, spam or
+                    # trash teaches nothing, so don't spend a read on it.
+                    if HISTORY_SKIP.intersection(message.get("labelIds") or ()):
+                        continue
                     if mid and mid not in seen:
                         seen.add(mid)
                         ids.append(mid)

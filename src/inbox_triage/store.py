@@ -29,8 +29,9 @@ def scoped_key(account: str, kind: str, value: str) -> str:
 class TriageStore:
     def __init__(self, path: str | Path):
         self.path = Path(path); self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Create the file private first: SQLite copies its mode onto the -wal and -shm files it adds.
+        os.close(os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)); os.chmod(self.path, 0o600)
         self.db = sqlite3.connect(self.path); self.db.executescript(_SCHEMA)
-        os.chmod(self.path, 0o600)
     def close(self): self.db.close()
     def __enter__(self): return self
     def __exit__(self, *_): self.close()

@@ -19,11 +19,29 @@ def http_error(status):
     return GmailError(status)
 
 
-def msg(labels=(), subject="", sender="Shop <orders@shop.example>", auth="dmarc=pass", thread="t1", to=""):
+def msg(labels=(), subject="", sender="Shop <orders@shop.example>", auth="mx.google.com; dmarc=pass", thread="t1", to=""):
     headers = [{"name": "Subject", "value": subject}, {"name": "From", "value": sender},
                {"name": "To", "value": to}, {"name": "Authentication-Results", "value": auth}]
     return {"labelIds": list(labels), "threadId": thread, "internalDate": str(NOW * 1000),
             "payload": {"headers": headers}}
+
+
+def test_only_gmails_own_authentication_results_header_counts(tmp_path):
+    """A sender can add its own Authentication-Results header below Gmail's; it must never override
+    Gmail's verdict, or anyone could spoof a domain rule, purchase history or the authenticated gate."""
+    from inbox_triage.gmail.extract import extract_gmail_message
+    forged = {"id": "m", "payload": {"headers": [
+        {"name": "Authentication-Results", "value": "mx.google.com; spf=fail smtp.mailfrom=x; dkim=fail; dmarc=fail (p=REJECT)"},
+        {"name": "From", "value": "Shop <orders@shop.example>"}, {"name": "Subject", "value": "Your order #1 shipped"},
+        {"name": "Authentication-Results", "value": "evil.example; spf=pass; dkim=pass; dmarc=pass"}]}}
+    assert extract_gmail_message(forged).auth == {"spf": "fail", "dkim": "fail", "dmarc": "fail"}
+    with TriageStore(tmp_path / "c.db") as store:
+        context.learn_message(store, "a@example.org", {**forged, "labelIds": [], "threadId": "t1"}, NOW)
+        assert not store.has_fact("a@example.org", "purchase_domain", "shop.example", NOW)
+    # Without Gmail's header there is no verdict at all, so nothing is "authenticated".
+    bare = {"id": "m", "payload": {"headers": [{"name": "Authentication-Results", "value": "dmarc=pass"},
+                                                {"name": "From", "value": "a@b.example"}]}}
+    assert extract_gmail_message(bare).auth["dmarc"] == "unknown"
 
 
 def test_purchase_query_uses_or_braces():
@@ -327,3 +345,83 @@ def test_tailored_rule_never_buries_protected_mail():
         assert decide(mail, ContextPack(), offer).destination not in {Destination.LATER, Destination.FOR_YOU}
     unprotected = MailEvidence("m", subject="New listings near you", bulk=True, list_unsubscribe=True)
     assert decide(unprotected, ContextPack(), JevSignals(personalized_offer=.95, service_update=.9)).destination != Destination.LATER
+
+
+def test_jev_outage_pauses_the_run_without_using_up_attempts(tmp_path, monkeypatch):
+    """A 5xx or transport error from Jev is Jev's problem, not the message's: the run pauses and
+    the message is asked again later, instead of being skipped for good after three outages."""
+    from inbox_triage.providers.jev import JevError
+    class Down:
+        def classify_with_usage(self, e, c):
+            err = JevError("Jev HTTP 503"); err.status = 503
+            raise err
+    live_setup(monkeypatch, ["m1", "m2"], Down())
+    for _ in range(3):
+        result = runner.run("a@example.org", tmp_path / "t.json", tmp_path / "s", now=NOW)
+        assert result["pause_code"] == "jev_unavailable" and result["paused_until"] == NOW + runner.UNAVAILABLE_RETRY
+        assert result["processed"] == 0 and result["provider_failures"] == 0 and result["remaining"]
+    assert runner.load_events(tmp_path / "s" / runner.scoped_directory(tmp_path / "s", "a@example.org").name / "events.jsonl") == {}
+    class Up:
+        def classify_with_usage(self, e, c): return JevSignals(personal_relevance=.99), {}
+    live_setup(monkeypatch, ["m1", "m2"], Up())
+    result = runner.run("a@example.org", tmp_path / "t.json", tmp_path / "s", now=NOW + 1)
+    assert result["outcomes"] == {"for_you": 2} and not result["remaining"]
+
+
+def test_uncertain_decision_never_writes_to_gmail():
+    """Mail Jev isn't sure about stays exactly as it was, including a Triage label the person added by hand."""
+    class Messages:
+        labels = {"INBOX", "needs"}
+        calls = []
+        def message_labels(self, mid): return set(self.labels)
+        def modify_labels(self, mid, add, remove): self.calls.append((add, remove))
+    m = Messages()
+    assert runner.apply_labels(m, "x", set(), {"Triage/Needs You": "needs", "Triage/Later": "later"}) is False
+    assert m.calls == []
+
+
+def test_native_label_drift_during_a_write_is_not_an_error():
+    """The person opening the mail between the read and the write (UNREAD gone) is not a readback failure."""
+    class Messages:
+        def message_labels(self, mid): return {"INBOX", "UNREAD"}
+        def modify_labels(self, mid, add, remove): return {"labelIds": ["INBOX", *add]}  # UNREAD went away meanwhile
+    assert runner.apply_labels(Messages(), "x", {"Triage/Later"}, {"Triage/Later": "later"}) is True
+
+
+def test_addresses_are_redacted_before_anything_goes_to_jev():
+    from inbox_triage.providers.base import evidence_state
+    e = MailEvidence("id", subject="Fwd: for bob@corp.example", sender_domain="corp.example",
+                     excerpt="Hi alice.smith@gmail.com, your account alice.smith+x@gmail.com is ready")
+    state = evidence_state(e, ContextPack(user_notes="my boss is pat@work.example"))
+    text = json.dumps(state)
+    assert "@" not in text and "[email]" in state["subject"] and state["excerpt"].count("[email]") == 2
+    assert state["context"]["user_preferences"] == "my boss is [email]"
+    assert state["sender_domain"] == "corp.example"
+
+
+def test_history_sync_skips_drafts_spam_and_trash_without_reading_them():
+    client = GmailClient.__new__(GmailClient)
+    page = {"history": [{"id": "9", "messagesAdded": [
+        {"message": {"id": "draft", "labelIds": ["DRAFT"]}}, {"message": {"id": "junk", "labelIds": ["SPAM"]}},
+        {"message": {"id": "sent", "labelIds": ["SENT"]}}, {"message": {"id": "plain"}}]}]}
+    client._request = lambda method, path, params=None, body=None: page
+    fetched = []
+    client._get = lambda mid, *, full: fetched.append(mid) or {"id": mid}
+    result = list(client.iter_history("1", max_pages=1, page_size=10))
+    assert fetched == ["sent", "plain"] and result[0]["last_history_id"] == "9"
+
+
+def test_corrupt_priorities_file_is_treated_as_empty(tmp_path):
+    path = tmp_path / "priorities.json"
+    path.write_text("{not json")
+    assert context.relevant_priorities(MailEvidence("id", subject="x"), path, NOW) == ()
+
+
+def test_run_history_is_bounded(tmp_path):
+    from inbox_triage.accounts import Account, MAX_RUNS_KEPT
+    acct = Account(tmp_path, "a@example.org")
+    for i in range(2 * MAX_RUNS_KEPT + 5):
+        acct.record_run({"started": i, "status": "ok", "trigger": "schedule"})
+    runs = acct.runs(None)
+    assert MAX_RUNS_KEPT <= len(runs) < 2 * MAX_RUNS_KEPT and runs[0]["started"] == 2 * MAX_RUNS_KEPT + 4
+    assert (acct.dir / "runs.jsonl").stat().st_mode & 0o077 == 0
