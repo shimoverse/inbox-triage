@@ -36,6 +36,8 @@ from . import extension as ext, oauth
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "inbox_triage_session"
 SESSION_TTL = 30 * 86400
+OAUTH_COOKIE = "inbox_triage_oauth"  # ties a Google sign-in to the browser that started it
+OAUTH_TTL = 900  # seconds a started sign-in stays valid, same as the pending table
 SUMMARY_TTL = 600  # seconds the dashboard reuses a message's sender/subject (memory only, never on disk)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EXT_CORS_PATHS = {"/api/ext/token", "/api/ext/summary", "/api/ext/sync"}
@@ -113,6 +115,19 @@ class App:
         flags = f"; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}" + ("; Secure" if self.secure else "")
         return f"{SESSION_COOKIE}={value}{flags}"
 
+    def oauth_cookie(self, state: str | None) -> str:
+        """The OAuth ``state`` of a sign-in this browser started, or (``None``) nothing. The callback only
+        completes a sign-in whose state this cookie carries, so a link to someone else's callback URL
+        can't add their account to this browser's session (login CSRF). Lax is enough: Google returns the
+        person with a top-level GET, which sends Lax cookies, and the cookie is scoped to the callback."""
+        value, age = (state, OAUTH_TTL) if state else ("", 0)
+        flags = f"; Path=/oauth/callback; HttpOnly; SameSite=Lax; Max-Age={age}" + ("; Secure" if self.secure else "")
+        return f"{OAUTH_COOKIE}={value}{flags}"
+
+    def oauth_state_from(self, environ) -> str:
+        cookie = SimpleCookie(environ.get("HTTP_COOKIE", ""))
+        return cookie[OAUTH_COOKIE].value if OAUTH_COOKIE in cookie else ""
+
     def __call__(self, environ, start_response):
         try:
             status, headers, body = self.handle(environ)
@@ -166,7 +181,8 @@ class App:
         if route == ("GET", "state"):
             return self.json(self.state(emails))
         if route == ("POST", "login"):
-            return self.json(self.login(body))
+            url, state = self.login(body)
+            return self.json({"url": url}, [("Set-Cookie", self.oauth_cookie(state))])
         if route == ("POST", "logout"):
             return self.json({"ok": True}, [("Set-Cookie", self.session_cookie([]))])
         if route == ("POST", "oauth-client"):
@@ -305,7 +321,8 @@ class App:
                 "rules": len(acct.preferences().rules)}
 
     # ------------------------------------------------------------------ OAuth
-    def login(self, body: dict) -> dict:
+    def login(self, body: dict) -> tuple[str, str]:
+        """Google's authorization URL for this sign-in, and its ``state`` (also set as this browser's cookie)."""
         email = str(body.get("email", "")).strip().casefold()
         if email and not EMAIL_RE.match(email):
             raise HTTPError(400, "Enter a valid email address")
@@ -334,7 +351,7 @@ class App:
             fences = self.config_dir / "disconnect-fences"
             self.pending[state] = {"verifier": verifier, "created": now, "hint": email, "next": after,
                                    "fences": {p.name: p.read_text() for p in fences.glob("*.json")}}
-        return {"url": url}
+        return url, state
 
     @property
     def redirect_uri(self) -> str:
@@ -347,6 +364,12 @@ class App:
             pending = self.pending.get(state)
         if not pending:
             return self.redirect("/#error=" + quote("Sign-in expired, please try again"))
+        # Bytes, not str: compare_digest rejects non-ASCII str, and the cookie value is whatever the client sent.
+        if not hmac.compare_digest(self.oauth_state_from(environ).encode("utf-8", "replace"), state.encode("utf-8", "replace")):
+            # Not the browser that started this sign-in: a link to someone else's callback, or a cookie
+            # that expired. Nothing is consumed, so the browser that did start it can still finish.
+            return self.redirect((pending.get("next") or "/") + "#error="
+                                 + quote("This sign-in was started in another browser or has expired; please try again"))
         # For a hinted account, reject a busy run before spending Google's
         # single-use authorization code. Keep state so retrying the callback works.
         if pending.get("hint") and "code" in query:
@@ -386,7 +409,7 @@ class App:
             return self.redirect(back + "#error=" + quote("Account is busy; sign in again"))
         emails = sorted(set(self.session_emails(environ)) | {email})
         target = pending["next"] if pending.get("next") else f"/#account={quote(email)}"
-        return self.redirect(target, [("Set-Cookie", self.session_cookie(emails))])
+        return self.redirect(target, [("Set-Cookie", self.oauth_cookie(None)), ("Set-Cookie", self.session_cookie(emails))])
 
     @staticmethod
     def redirect(location: str, headers=None):

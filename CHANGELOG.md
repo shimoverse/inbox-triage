@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **A Google sign-in only completes in the browser that started it.** `/api/login` sets a short-lived, HttpOnly cookie scoped to the callback, and the callback refuses a `state` the cookie doesn't carry, without spending Google's code. Before, a link to someone else's callback URL added their account to the visitor's session (login CSRF).
 - **Only Gmail's own authentication verdict counts.** A sender could add its own `Authentication-Results: … dmarc=pass` header below Gmail's and unlock domain rules, purchase history and the authenticated gate for a spoofed domain. Now only the header with Gmail's authserv-id (`mx.google.com`) is read, and the first occurrence of every header wins.
 - **A Jev outage pauses the run** (*Jev isn't answering right now*, retried in 15 minutes) instead of counting against each message's three attempts; three outages no longer leave mail unlabeled for good.
 - **Uncertain mail is really left alone.** An uncertain or excluded decision no longer removes an Inbox Triage label the person added by hand, and a native label changing mid-write (UNREAD, say) is no longer a readback error.
