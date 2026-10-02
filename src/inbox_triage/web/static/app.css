@@ -563,3 +563,7 @@ input[aria-invalid="true"] { border-color: var(--bad); }
 @media (max-width: 380px) {
   .runctl select { flex-basis: 100%; }
 }
+
+.cta-problem:empty { display: none; }
+.cta-problem .notice { margin-top: 12px; }
+.cta-problem .btn.link { padding: 0; font-weight: 600; }

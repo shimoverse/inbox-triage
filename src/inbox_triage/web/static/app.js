@@ -143,7 +143,10 @@ async function api(path, method = "GET", body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const fallback = res.status >= 500 ? `Inbox Triage had a problem (${res.status}). Try again in a minute.` : `Request failed (${res.status})`;
+    throw Object.assign(new Error(data.error || fallback), { status: res.status });
+  }
   return data;
 }
 const acctPath = (email, action) => `accounts/${encodeURIComponent(email)}/${action}`;
@@ -223,10 +226,11 @@ function pauseCause(r, a) {
   if (r?.reason === "sponsored_limit") return "Today's free sorting allowance for this account is used up";
   if (r?.reason === "jev_credits") return a?.own_jev_key ? "Your Jev key is out of credits. Add credits with its provider"
     : "The shared free Jev allowance is used up for now";
+  if (r?.reason === "jev_unavailable") return "Jev isn't answering right now";
   return "Gmail asked Inbox Triage to slow down";
 }
 const pauseShort = (r) => r?.reason === "sponsored_limit" ? "daily allowance used"
-  : r?.reason === "jev_credits" ? "out of Jev credits" : "Gmail asked for a break";
+  : r?.reason === "jev_credits" ? "out of Jev credits" : r?.reason === "jev_unavailable" ? "Jev unavailable" : "Gmail asked for a break";
 
 // When a run Gmail paused carries on by itself.
 function resumeText(a) {
@@ -294,7 +298,7 @@ function betaBanner() {
   if (!b || !b.enabled) return fill(slot);
   const until = b.ends ? new Date(b.ends + "T00:00:00").toLocaleDateString(undefined, { dateStyle: "long" }) : null;
   const parts = [b.ended ? "Free hosted access has ended"
-    : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "user" : `${b.max_accounts} users`}` : "Free hosted access"];
+    : b.max_accounts ? `Free for the first ${b.max_accounts === 1 ? "account" : `${b.max_accounts} accounts`}` : "Free hosted access"];
   if (until && !b.ended) parts[0] += ` until ${until}`;
   parts.push(STATE.jev.sponsored ? "No API key needed" : "Bring your own Jev key");
   fill(slot, parts.map((p) => el("span", {}, p + " ·")),
@@ -363,12 +367,12 @@ document.addEventListener("click", (e) => {
 });
 
 // ---------------------------------------------------------------- sign in
-async function startGoogle(email, btn) {
+async function startGoogle(email, btn, onError = toast) {
   if (btn) btn.disabled = true;
   try {
     const { url } = await api("login", "POST", { email: (email || "").trim() });
     location.href = url;
-  } catch (err) { toast(err.message); if (btn) btn.disabled = false; }
+  } catch (err) { onError(err); if (btn) btn.disabled = false; }
 }
 const PERMISSION_NOTE = "Google will ask to let Inbox Triage “view and modify” Gmail. That's the narrowest permission " +
   "that allows adding labels; the app only ever adds or removes its own.";
@@ -406,9 +410,21 @@ function renderLanding() {
   const email = el("input", { type: "email", id: "hint-email", placeholder: "you@gmail.com", autocomplete: "email" });
   const hint = el("div", { class: "field", hidden: true },
     el("label", { for: "hint-email" }, "Which Google account?"), email);
-  const specific = el("button", { type: "button", class: "btn link", onclick: () => { hint.hidden = false; specific.hidden = true; email.focus(); } },
-    "Use a specific account");
-  const go = (e) => { e.preventDefault(); startGoogle(email.value, e.submitter); };
+  const showHint = () => { hint.hidden = false; specific.hidden = true; email.focus(); };
+  const specific = el("button", { type: "button", class: "btn link", onclick: showHint }, "Use a specific account");
+  const problemBox = el("div", { class: "cta-problem", role: "alert" });
+  // "Access is full" stays on screen with its link and next step; a toast would vanish in seconds.
+  const showProblem = (err) => {
+    if (err.status !== 409) return toast(err.message);
+    const text = String(err.message).replace(/\s*Already a member\?.*$/, "");
+    const [before, repo] = text.split("github.com/shimoverse/inbox-triage");
+    fill(problemBox, el("p", { class: "notice err" }, before,
+      repo !== undefined ? el("a", { href: "https://github.com/shimoverse/inbox-triage", target: "_blank", rel: "noopener" }, "github.com/shimoverse/inbox-triage") : null,
+      repo || "", " ", el("b", {}, "Already a member?"), " ",
+      el("button", { type: "button", class: "btn link", onclick: showHint }, "Enter your address to sign back in"), "."));
+    problemBox.querySelector("button")?.focus();
+  };
+  const go = (e) => { e.preventDefault(); startGoogle(email.value, e.submitter, showProblem); };
   const preview = el("div", { class: "pile" },
     el("div", { class: "preview", role: "img", "aria-label": "Example: an inbox after a run, with Needs You, For You, Updates, Shopping and Later labels" },
       el("div", { class: "preview-head" }, el("b", {}, "Inbox"), el("span", {}, "Sorted 2 minutes ago")),
@@ -426,11 +442,12 @@ function renderLanding() {
       el("div", { class: "hero-copy" },
         el("span", { class: "eyebrow" }, el("span", { class: "dot", "aria-hidden": "true" }), "Gmail triage, powered by Jev"),
         el("h1", { class: "display", tabindex: "-1" }, "Know what needs you. Let the rest wait."),
-        el("p", { class: "lead" }, "Inbox Triage adds four simple labels to your Gmail on a schedule you choose. " +
-          "It never sends, deletes, archives, or marks anything read."),
+        el("p", { class: "lead" }, "Inbox Triage adds a few simple labels to your Gmail on a schedule you choose: Needs You, Updates, " +
+          "For You and Later, plus Shopping and Junk when they apply. It never sends, deletes, archives, or marks anything read."),
         el("form", { class: "cta", onsubmit: go },
           hint,
           el("div", { class: "cta-row" }, el("button", { type: "submit", class: "btn primary lg" }, "Continue with Google", icon("arrow", 18)), specific),
+          problemBox,
           el("p", { class: "fine" }, PERMISSION_NOTE))),
       preview),
     el("div", { class: "band" }, el("section", { class: "section", "aria-labelledby": "labels-h" },
@@ -439,14 +456,18 @@ function renderLanding() {
         el("p", {}, "Your mail stays in your inbox, exactly where it was. Each email gets at most one of these, " +
           "so you can see at a glance what to open first.")),
       el("ul", { class: "label-cards" }, ATTENTION.map((k) => el("li", {}, pill(k, true), el("p", {}, LABELS[k].help)))),
-      el("p", { class: "note-line" }, pill("shopping"), "is added to orders and deliveries too. Anything Jev isn't sure about stays unlabeled."))),
+      el("p", { class: "note-line" }, pill("shopping"), "is added to orders and deliveries too, and ", pill("junk"),
+        " marks what you've said is junk. Anything Jev isn't sure about stays unlabeled."))),
     el("section", { class: "section extension-section", "aria-labelledby": "extension-h" },
       el("div", { class: "intro" },
         el("span", { class: "eyebrow" }, "Chrome and Brave extension"),
         el("h2", { class: "h-big", id: "extension-h" }, "See your triage right in Gmail."),
         el("p", {}, "The optional extension shows your label counts in Gmail and asks your connected server to check for new mail. It does not hold your Google token or an AI key."),
-        el("p", { class: "extension-status", role: "status" }, "Chrome Web Store download is not available yet; the public listing is awaiting review."),
-        el("a", { class: "btn", href: "https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md", target: "_blank", rel: "noopener" }, "View extension and developer setup instructions"))),
+        STATE.extension?.store_url
+          ? el("a", { class: "btn primary", href: STATE.extension.store_url, target: "_blank", rel: "noopener" }, "Add to Chrome", icon("external", 15))
+          : el("p", { class: "extension-status", role: "status" }, "It isn't in the Chrome Web Store yet. Developers can load it from the repository."),
+        el("a", { class: STATE.extension?.store_url ? "btn link" : "btn", href: "https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md", target: "_blank", rel: "noopener" },
+          STATE.extension?.store_url ? "Developer setup and source" : "View extension and developer setup instructions"))),
     el("section", { class: "section", id: "how", "aria-labelledby": "how-h" },
       el("h2", { class: "h-big", id: "how-h" }, `${STATE.jev.sponsored ? "Two" : "Three"} steps, then it runs on its own`),
       el("ol", { class: "steps3" }, howSteps().map(([title, text], i) =>
@@ -460,8 +481,8 @@ function renderLanding() {
 
 // A sponsored beta pays for Jev, so there's no key to connect.
 function howSteps() {
-  const jev = ["Connect Jev", ["Jev by TypeSafe makes a fast yes-or-no call on each email. Paste your own key from ",
-    el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "console.typesafe.ai"), "."]];
+  const jev = ["Connect Jev", ["Jev by TypeSafe makes a fast yes-or-no call on each email. Paste an OpenRouter key or a TypeSafe key; ",
+    el("a", { href: STATE.jev.signup_url, target: "_blank", rel: "noopener" }, "get one here"), "."]];
   return [
     ["Sign in with Google", "Approve one permission so Inbox Triage can add its labels to your Gmail."],
     ...(STATE.jev.sponsored ? [] : [jev]),
@@ -1184,7 +1205,7 @@ function settingsPane(a) {
     saveBtn.disabled = false;
   };
   const disconnect = async () => {
-    if (!confirm(`Disconnect ${a.email}? This removes your rules, settings, Jev key and history from the active server and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay.`)) return;
+    if (!confirm(`Disconnect ${a.email}? This removes your rules, settings, Jev key and history from the active server, disconnects the Gmail extension, and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay.`)) return;
     try {
       await api(`accounts/${encodeURIComponent(a.email)}`, "DELETE");
       toast(`Disconnected ${a.email} and deleted its data.`);
@@ -1226,7 +1247,7 @@ function settingsPane(a) {
       el("div", { class: "setrow" },
         el("div", { class: "lbl" }, el("h2", { id: "danger-h" }, "Disconnect"), el("p", {}, "Leave and delete your data.")),
         el("div", { class: "ctl side" },
-          el("p", {}, "Removes your rules, settings, Jev key and history from the active server and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay."),
+          el("p", {}, "Removes your rules, settings, Jev key and history from the active server, disconnects the Gmail extension, and asks Google to revoke access. Backups may persist until they expire. Labels already in Gmail stay."),
           el("button", { class: "btn danger", type: "button", onclick: disconnect }, icon("trash", 16), "Disconnect account")))));
 }
 

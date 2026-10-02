@@ -69,7 +69,7 @@ def api_key_for(role: str, config_dir: Path = CONFIG_DIR) -> str:
 
 def sponsored_daily_limit() -> int:
     """INBOX_TRIAGE_SPONSORED_JEV_DAILY: how many Jev calls a day, per account, the operator's
-    key pays for on a hosted server (a sponsored beta). 0 or unset: every user brings a key."""
+    key pays for on a hosted server (sponsored access). 0 or unset: every user brings a key."""
     try:
         return max(0, int(os.environ.get("INBOX_TRIAGE_SPONSORED_JEV_DAILY") or 0))
     except ValueError:

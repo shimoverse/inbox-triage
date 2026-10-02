@@ -62,7 +62,8 @@ def test_extension_option_does_not_claim_unavailable_store_download(app):
     status, _, script = call(app, "GET", "/static/app.js")
     assert status == 200
     assert b"Chrome and Brave extension" in script
-    assert b"Chrome Web Store download is not available yet" in script
+    # The "Add to Chrome" button only appears when the server supplies the store URL (see extension_store_url).
+    assert b"It isn't in the Chrome Web Store yet" in script and b"STATE.extension?.store_url" in script
     assert b"https://github.com/shimoverse/inbox-triage/blob/main/extension/README.md" in script
 
 
@@ -680,9 +681,12 @@ def test_privacy_policy_page_for_google_consent_screen(app, monkeypatch):
     monkeypatch.setenv("INBOX_TRIAGE_SUPPORT_EMAIL", "help@example.org")
     status, headers, body = call(app, "GET", "/privacy")
     text = body.decode()
-    assert status == 200 and "help@example.org" in text and "{{" not in text
+    assert status == 200 and 'href="mailto:help@example.org"' in text and "{{" not in text
     assert "Limited Use" in text and "gmail.modify" in text and "Disconnect account" in text
     assert b"<script" not in body
+    monkeypatch.delenv("INBOX_TRIAGE_SUPPORT_EMAIL")
+    text = call(app, "GET", "/privacy")[2].decode()
+    assert "mailto:" not in text and "Contact: the operator." in text and "{{" not in text  # no link to nobody
     index = call(app, "GET", "/")[2].decode()
     assert 'href="/privacy"' in index and "never sends, deletes" in index
 

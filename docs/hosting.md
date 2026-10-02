@@ -60,13 +60,13 @@ In hosted mode:
 
 - the server refuses plain-HTTP public URLs, and session cookies are marked `Secure`;
 - each person signs in with Google and can only see their own account;
-- **by default, every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** its own Jev key unless you run a [sponsored beta](#5-sponsored-beta-the-operator-pays-for-jev), so the operator never pays for other users by accident;
+- **by default, every user brings their own Jev key** during onboarding. It's verified with Jev, stored per account (0600), and used only for that account's mail. A hosted server **ignores** its own Jev key unless you [sponsor access](#5-sponsored-access-the-operator-pays-for-jev), so the operator never pays for other users by accident;
 - the OAuth client, the optional notes assistant (`OPENROUTER_API_KEY`, DeepSeek V4.1 Flash by default), and the contact shown on the built-in privacy policy (`INBOX_TRIAGE_SUPPORT_EMAIL`, `INBOX_TRIAGE_OPERATOR`) come from `/etc/inbox-triage/env`;
-- **optional free-beta limits:**
+- **optional free-access limits:**
   - `INBOX_TRIAGE_MAX_ACCOUNTS=90`: once 90 accounts exist, *Continue with Google* is turned away before Google's consent screen.
   - Returning users choose *Use a specific account* and enter their address.
   - A typed address always goes on to Google, so the server never reveals who has an account. Anyone who isn't a member is turned away after Google, and their fresh grant is revoked straight away.
-  - Keep the limit below 100. Google's cap for an unverified app counts every person who ever approved it, including your own test accounts and anyone turned away by versions before 0.6.
+  - Keep the limit below 100 (the install script sets 90, which is what the public copy says). Google's cap for an unverified app counts every person who ever approved it, including your own test accounts and anyone turned away by versions before 0.6.
   - `INBOX_TRIAGE_BETA_ENDS=YYYY-MM-DD` (optional, unset by default) adds an end date to the banner. It's informational: the app keeps running, and you decide what happens next.
   - Counts are never shown to users;
 - the app serves its own home page (`/`) and privacy policy (`/privacy`), so the consent screen can use `https://<domain>/` and `https://<domain>/privacy`;
@@ -78,7 +78,7 @@ You are now processing other people's mail: publish a privacy policy, keep a doc
 
 **Prefer containers?** A `Dockerfile` is included as an alternative: mount `/data`, pass the same environment variables, add `--public-url https://…`, and put any TLS proxy in front of port 8765.
 
-## 5. Sponsored beta: the operator pays for Jev
+## 5. Sponsored access: the operator pays for Jev
 
 To take the key step out of onboarding, the server can pay for users' Jev calls, up to a daily limit per account. Jev is sold on OpenRouter, so one OpenRouter key is enough.
 
@@ -111,9 +111,11 @@ The extension ([extension/README.md](../extension/README.md)) draws a live dashb
 
 - **Sign-in:** the extension signs in with `chrome.identity.launchWebAuthFlow` against this server's `/connect` page. That works in Chrome and Brave.
   - The person approves the extension there, and the server hands it a one-time code bound to a PKCE challenge.
-  - The extension swaps the code for a token. The token lasts 90 days, can only read that account's dashboard and ask for a sync, and is revoked by *Disconnect* in the extension or on the website.
-- **List the extension's ID:** a hosted server hands tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS` (comma-separated IDs). Without it, extension sign-in is turned off. The existing unpacked beta ID is `leagpjpjajkpjaiegjjenjnlegffkofj`; when the Chrome Web Store assigns a different ID, allowlist **both** IDs before distribution, then remove the unpacked ID only after its testers have migrated. Store installs have separate extension storage, so testers must reconnect. See [the store beta worksheet](../extension/STORE_BETA.md#stable-id-and-beta-migration--no-private-key-in-the-repository).
-- **Default schedule:** accounts connected from the extension get an hourly schedule if they don't have one yet, so mail keeps getting labeled between visits.
+  - The extension swaps the code for a token. The token lasts 90 days and can only read that account's dashboard and ask for a sync. *Disconnect* in the extension's settings revokes it; *Disconnect account* on the website removes the account's data altogether, tokens included.
+- **List the extension's ID:** a hosted server hands tokens only to extensions listed in `INBOX_TRIAGE_EXTENSION_IDS` (comma-separated IDs). Without it, extension sign-in is turned off. The existing unpacked development ID is `leagpjpjajkpjaiegjjenjnlegffkofj`; when the Chrome Web Store assigns a different ID, allowlist **both** IDs and restart the server **before submitting the listing for review**: the reviewer's *Connect Gmail* click fails otherwise. Remove the unpacked ID only after its testers have migrated. Store installs have separate extension storage, so testers must reconnect. See [the store worksheet](../extension/STORE_BETA.md#stable-id-and-installation-migration--no-private-key-in-the-repository).
+- **Store link on the home page:** once the listing is public, set `INBOX_TRIAGE_EXTENSION_STORE_URL` to its URL and the home page shows *Add to Chrome*; until then it says the extension isn't in the store yet.
+- **Default schedule:** an account that connects from the extension before finishing setup on the website gets an hourly schedule, so mail keeps getting labeled between visits. An account that already chose a schedule (including *Manual*) keeps it.
+- **Use the built-in scheduler, not cron:** `inbox-triage --all --due` runs in self-hosted mode and would use the server's own Jev key for every account, without the sponsored daily limit.
 - **Syncs cost little:** each account's extension can start at most one sync a minute. A sync continues from the last checkpoint and skips mail it has already labeled, so it costs Jev calls only for new mail.
 
 ## 7. Alternatives if you want zero Google setup

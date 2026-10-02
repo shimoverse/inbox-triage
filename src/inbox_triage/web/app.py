@@ -252,10 +252,13 @@ class App:
     def privacy(self):
         """Privacy policy for Google's consent screen; the operator's contact comes from the environment."""
         import html as _html
-        email = _html.escape(os.environ.get("INBOX_TRIAGE_SUPPORT_EMAIL", "the operator"))
+        address = os.environ.get("INBOX_TRIAGE_SUPPORT_EMAIL", "").strip()
+        email = _html.escape(address or "the operator")
+        contact = f'<a href="mailto:{email}">{email}</a>' if EMAIL_RE.match(address) else email  # no mailto: to nobody
         operator = _html.escape(os.environ.get("INBOX_TRIAGE_OPERATOR", "the operator of this Inbox Triage server"))
         status, headers, body = self.static("privacy.html")
-        return status, headers, body.decode().replace("{{SUPPORT_EMAIL}}", email).replace("{{OPERATOR}}", operator).encode()
+        text = body.decode().replace("{{SUPPORT_CONTACT}}", contact).replace("{{SUPPORT_EMAIL}}", email).replace("{{OPERATOR}}", operator)
+        return status, headers, text.encode()
 
     # ------------------------------------------------------------------ state
     def state(self, emails: list[str]) -> dict:
