@@ -3,6 +3,7 @@ dashboard summary and syncs. WSGI calls only; synthetic data; no network."""
 import base64
 import hashlib
 import json
+import threading
 from urllib.parse import parse_qs, urlparse
 
 from inbox_triage.accounts import Account
@@ -219,6 +220,54 @@ def test_the_extension_can_disconnect_while_a_run_holds_the_lock(app):  # noqa: 
         assert call(app, "GET", "/api/ext/summary?tz=UTC", headers=bearer(token))[0] == 200
         assert call(app, "DELETE", "/api/ext/token", headers=bearer(token))[0] == 200
     assert call(app, "GET", "/api/ext/summary", headers=bearer(token))[0] == 401
+
+
+def test_token_exchange_cannot_resurrect_a_concurrently_revoked_token(app, monkeypatch):
+    """Issuing a second token and revoking the first must serialize registry writes."""
+    first = connect(app)
+    _, _, data = authorize(app, signed_in(app))
+    code = parse_qs(urlparse(data["redirect"]).query)["code"][0]
+    loaded = threading.Event()
+    release = threading.Event()
+    original = ext.TokenRegistry._load
+
+    def paused_load(registry):
+        tokens = original(registry)
+        if threading.current_thread().name == "exchange":
+            loaded.set()
+            assert release.wait(3)
+        return tokens
+
+    monkeypatch.setattr(ext.TokenRegistry, "_load", paused_load)
+    results = {}
+    revoked = threading.Event()
+
+    def exchange():
+        results["exchange"] = call(app, "POST", "/api/ext/token",
+                                   {"code": code, "code_verifier": VERIFIER, "redirect_uri": REDIRECT}, headers=ORIGIN)
+
+    def revoke():
+        results["revoke"] = call(app, "DELETE", "/api/ext/token", headers=bearer(first))
+        revoked.set()
+
+    issuing = threading.Thread(target=exchange, name="exchange")
+    deleting = threading.Thread(target=revoke, name="revoke")
+    issuing.start()
+    try:
+        assert loaded.wait(3)
+        deleting.start()
+        # On the old implementation revocation completes before the stale add writes.
+        # On the fixed implementation it waits for the registry read gate.
+        revoked.wait(0.2)
+    finally:
+        release.set()
+        issuing.join(3)
+        if deleting.ident is not None:
+            deleting.join(3)
+    assert not issuing.is_alive() and not deleting.is_alive()
+    assert results["exchange"][0] == results["revoke"][0] == 200
+    assert call(app, "GET", "/api/ext/summary", headers=bearer(first))[0] == 401
+    assert call(app, "GET", "/api/ext/summary", headers=bearer(results["exchange"][2]))[0] == 200
 
 
 def test_summary_details_are_fetched_outside_the_read_gate(app, monkeypatch):  # noqa: F811

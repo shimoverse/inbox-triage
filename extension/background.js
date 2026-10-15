@@ -107,12 +107,19 @@ async function withToken(email, fn) {
 }
 
 async function sync(email, force) {
-  const now = Date.now();
-  const { lastSync = {} } = await chrome.storage.session.get("lastSync");
-  if (!force && now - (lastSync[email] || 0) < SYNC_GAP) return { connected: true, data: { started: false, reason: "recent" } };
-  lastSync[email] = now;
-  await chrome.storage.session.set({ lastSync });
-  return withToken(email, (server, token) => call(server, "ext/sync", { method: "POST", token, body: {} }));
+  return withToken(email, async (server, token) => {
+    const now = Date.now();
+    const key = tokenKey(server, email);
+    const { lastSync = {} } = await chrome.storage.session.get("lastSync");
+    if (!force && now - (lastSync[key] || 0) < SYNC_GAP) {
+      return { started: false, reason: "recent" };
+    }
+    const result = await call(server, "ext/sync", { method: "POST", token, body: {} });
+    // A disconnected account or a failed request must not consume this account's sync window.
+    lastSync[key] = now;
+    await chrome.storage.session.set({ lastSync });
+    return result;
+  });
 }
 
 // Forget an account's token here and, when it can be reached, on the server it was issued by. The options
