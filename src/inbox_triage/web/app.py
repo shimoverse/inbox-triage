@@ -727,7 +727,11 @@ class App:
                     raise HTTPError(409, "Reconnect this account with Google")
                 if not self.connected(entry["email"]):
                     raise HTTPError(409, "Reconnect this account with Google")
-                ext.TokenRegistry(Account(self.state_dir, entry["email"]).dir).add(token_id, now)
+                # Issuance and DELETE /ext/token must serialize read-modify-write of extension.json.
+                # Keep account -> read-gate lock order, as account deletion does.
+                gate = account_lock_path(self.state_dir, entry["email"]).with_suffix(".read.lock")
+                with account_lock(gate, blocking=True):
+                    ext.TokenRegistry(Account(self.state_dir, entry["email"]).dir).add(token_id, now)
         except RuntimeError as exc:
             if str(exc) != "Account triage is already running":
                 raise

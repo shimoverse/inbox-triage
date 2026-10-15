@@ -13,11 +13,11 @@
       <img src="icons/icon48.png" width="32" height="32" alt="">
       <h1>Inbox Triage</h1>
     </header>
-    <p class="lead">Shows your Inbox Triage dashboard at the top of Gmail and asks your Inbox Triage server to sort new
-      mail as it arrives. The extension holds no Google or AI keys and never reads, sends or changes mail itself.</p>
+    <p class="lead">Shows label activity and recent senders and subjects in Gmail. It reads the Gmail tab title to select your account and asks your connected server to check for new mail; the server may add Inbox Triage labels. The extension stores a revocable server sign-in token, not your Google token or AI key. It does not read message bodies from Gmail's page.</p>
+    <p class="help">To get started, sign in on your Inbox Triage server, then <a href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer">open Gmail</a> for the same account and choose <b>Connect Gmail</b> in the bar.</p>
 
     <section aria-labelledby="server-h">
-      <h2 id="server-h">Server</h2>
+      <h2 id="server-h">Server address (self-hosting)</h2>
       <form id="server-form">
         <label for="server">Inbox Triage address</label>
         <div class="row">
@@ -33,6 +33,7 @@
       <h2 id="accounts-h">Connected Gmail accounts</h2>
       <ul id="accounts"></ul>
       <p class="help">To connect an account, open Gmail and click <b>Connect Gmail</b> in the Inbox Triage bar.</p>
+      <p class="help">Disconnecting here removes this browser's server token and asks the server to revoke it when reachable. It does not disconnect Gmail from the server or remove existing labels; use the server's Settings to disconnect the Gmail account and delete its stored data.</p>
     </section>
   </main>
   <script src="config.js"></script>

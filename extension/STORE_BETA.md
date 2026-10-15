@@ -1,18 +1,18 @@
 # Chrome Web Store release — operator worksheet
 
-The extension is submitted for review as a **Public** listing with automatic publication after approval. This worksheet records the intended copy and privacy declarations; verify the live dashboard before each update. The hosted service still has a limited-account rollout and Google's Gmail OAuth verification is separate from Web Store review.
+The public Web Store listing `ndimpnchfbadobojjglifhjcncmcmmim` offered **Add to Brave** on October 15, 2026, showing version 0.1.1. Source package 0.1.3 is a proposed update, not published until the existing item accepts and releases it. Verify the publisher dashboard and public page before each update. Hosted account access and Google's Gmail OAuth verification are separate from Web Store approval.
 
 ## Listing
 
 - **Name:** Inbox Triage (the package manifest uses the same name).
 - **Category:** Productivity
 - **Language:** English
-- **Short description (manifest):** A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.
+- **Short description (manifest):** See recent Inbox Triage labels in Gmail and ask your connected server to check new mail.
 - **Detailed description:**
 
-  Inbox Triage adds a dashboard above Gmail with seven-day counts for its labels, a daily activity chart, and recently labeled messages. Click a label count to open that label in Gmail. While Gmail is open, the extension asks your connected Inbox Triage server to check for new mail when the unread count rises; the server also runs on a schedule.
+  Inbox Triage adds a dashboard above Gmail with counts of labels applied in the last seven days, a daily activity chart, and recently labeled messages. These counts are activity, not a current Needs You backlog. Click a label count to open that label in Gmail. While Gmail is open, the extension can ask your connected server to check for new mail when the unread count rises; the server also runs on a schedule.
 
-  To start, open Gmail, click Connect Gmail in the dashboard, sign in on the Inbox Triage server, and approve Gmail access. The extension itself does not read message bodies from Gmail's page or hold a Google OAuth token or an AI API key. The server reads mail through the Gmail API and applies labels after the separate Google authorization. The dashboard receives label counts and recent senders and subjects from that server. No messages are sent, deleted, archived, marked read, or moved to Spam by Inbox Triage.
+  To start, open Gmail, click Connect Gmail in the dashboard, sign in on the Inbox Triage server, and approve Gmail access. The extension reads the Gmail tab title to identify the account, stores a revocable server sign-in token, and receives label counts and recent senders and subjects. It does not read message bodies from Gmail's page or hold a Google OAuth token or an AI API key. The server reads mail through the Gmail API and may add its labels after the separate Google authorization. Inbox Triage does not send, delete, archive, mark read, or move mail to Spam. Disconnecting the extension removes this browser's connection; disconnecting Gmail and deleting server data is separate in server Settings.
 
   Google's OAuth consent may display an unverified-app warning. You can also point the extension at your own Inbox Triage server in its settings. Chrome and Brave are supported.
 
@@ -39,7 +39,7 @@ The extension is submitted for review as a **Public** listing with automatic pub
 ## Assets and review prerequisites
 
 - Package icon: `icons/icon128.png` (128×128 PNG); store promo: `store-assets/promo-small.png` (440×280 PNG). The promo is an illustration, **not** a screenshot of the app.
-- **Still needed:** at least one genuine 1280×800 or 640×400 screenshot of the working extension in Gmail, using a synthetic/test mailbox with no real personal data. Do not substitute a mockup for an app screenshot. Check against current dashboard requirements when uploading. Optional marquee and video only if requested/available.
+- The public listing displayed a 1280×800 screenshot on October 15, 2026. Reinspect the image for privacy and fidelity to the new build before retaining it; a public image's presence alone is not proof of a synthetic mailbox or current UI. Replace with a genuine synthetic-mailbox screenshot if it is stale or reveals personal data. Do not substitute a mockup for an app screenshot.
 - Before review: verify Gmail bar placement, Chrome and Brave `launchWebAuthFlow`, hosted `/privacy`, server availability, account capacity and tester instructions. Do not give reviewer private credentials in this repo.
 
 ## Stable ID and installation migration — no private key in the repository

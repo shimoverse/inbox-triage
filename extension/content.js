@@ -275,7 +275,7 @@
   function chips(summary) {
     const totals = summary.totals || {};
     return h("div", { class: "chips", role: "group", "aria-label": "Labeled in the last 7 days" },
-      h("span", { class: "span" }, "Last 7 days"),
+      h("span", { class: "span" }, "Labeled in the last 7 days"),
       L.LABELS.filter((l) => (l.key !== "junk" && l.key !== "shopping") || totals[l.key])
         .map((l) => chip(l, totals[l.key] || 0)));
   }
@@ -410,7 +410,7 @@
     const floating = root.classList.contains("floating");
     // A refresh that found nothing new must not rebuild the bar: that would drop keyboard focus and the chart tip.
     const key = JSON.stringify([state.email, state.connected, state.error, state.notice, state.busy, state.expanded,
-      floating, state.summary, Math.floor(Date.now() / 60000)]);
+      floating, state.summary]);
     if (key === drawn) return;
     drawn = key;
     if (!state.email) return fill(root);

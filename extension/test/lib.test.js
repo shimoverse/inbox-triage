@@ -56,6 +56,9 @@ test("says what is happening in plain words", () => {
   assert.match(L.statusLine({ jev_connected: true, resume_at: now + 900, last_run: { status: "paused", reason: "jev_unavailable" } }, now).text,
     /^Jev isn't answering right now\. Carries on in 15 min$/);
   assert.equal(L.statusLine({ jev_connected: true, last_run: { status: "ok" } }, now).text, "Sorted recently");
+  assert.equal(L.statusLine({ jev_connected: true }, now).kind, "idle");
+  assert.equal(L.statusLine({ jev_connected: true, last_run: { status: "ok", mode: "dry-run", finished: now - 120 } }, now).text,
+    "Previewed 2 min ago; no labels added");
   assert.equal(L.until(now + 3 * 86400, now), "in 3 days");
   assert.equal(L.until(now + 7200, now), "in 2 h");
   assert.equal(L.ago(now - 86400, now), "1 day ago");

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Inbox Triage",
-  "version": "0.1.2",
-  "description": "A live Inbox Triage dashboard at the top of Gmail: what needs you, what can wait, sorted as mail arrives.",
+  "version": "0.1.3",
+  "description": "See recent Inbox Triage labels in Gmail and ask your connected server to check new mail.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "identity"],
   "background": { "service_worker": "background.js" },
