@@ -40,11 +40,13 @@ async function draw() {
       const button = document.createElement("button");
       button.className = "quiet";
       button.type = "button";
-      button.textContent = "Disconnect";
+      button.textContent = "Disconnect extension";
       button.addEventListener("click", async () => {
         button.disabled = true;
-        await chrome.runtime.sendMessage({ type: "disconnect", email: entry.email, server: origin });
-        draw();
+        const result = await chrome.runtime.sendMessage({ type: "disconnect", email: entry.email, server: origin });
+        if (result?.error) say(result.error, "err");
+        else say("This browser's connection was removed. Your Gmail account and existing labels remain on the server. If the server was offline, its token may remain valid until expiry; disconnect the account there to revoke access.", "ok");
+        await draw();
       });
       li.append(name, button);
       list.append(li);

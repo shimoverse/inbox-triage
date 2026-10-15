@@ -93,8 +93,9 @@
     }
     if (last && last.status === "error") return { kind: "warn", text: "The last run didn't finish. Open Inbox Triage for details" };
     if (s.preview) return { kind: "idle", text: "Preview mode: labels aren't added to Gmail" };
-    if (!last) return { kind: "live", text: "Getting ready to sort your recent mail" };
+    if (!last) return { kind: "idle", text: "No run yet. Open Inbox Triage to start" };
     const when = last.finished || last.started;
+    if (last.mode === "dry-run") return { kind: "idle", text: when ? `Previewed ${ago(when, now)}; no labels added` : "Previewed; no labels added" };
     return { kind: "live", text: when ? `Sorted ${ago(when, now)}` : "Sorted recently" };
   }
 

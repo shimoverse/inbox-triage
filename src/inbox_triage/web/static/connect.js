@@ -71,8 +71,7 @@ function approve(email, errorText) {
       el("p", { class: "lead" }, "The Inbox Triage extension will show your dashboard at the top of Gmail for ",
         el("b", {}, email), " and ask this server to sort new mail as it arrives.")),
     problem(errorText),
-    el("p", { class: "small muted" }, "The extension can read your label counts and recently labeled emails' senders and " +
-      "subjects. It can't read, send, delete or change your mail, and it holds no keys. Disconnect it any time from its settings."),
+    el("p", { class: "small muted" }, "The extension reads Gmail's tab title to select your account, displays label counts and recent senders and subjects from this server, and stores a revocable server sign-in token (not a Google or AI key). It can ask this server to check new mail; the server may add Inbox Triage labels using the Gmail permission you approved. It does not read message bodies from Gmail's page, send, delete, archive, mark read or move mail to Spam. Disconnect the extension from its settings; disconnecting Gmail and deleting server data is a separate action in the app."),
     el("div", { class: "row" },
       el("button", { class: "btn primary", type: "button", onclick: go }, "Connect"),
       el("button", { class: "btn ghost", type: "button", onclick: () => fill(box, signIn("")) }, "Use a different account")),
